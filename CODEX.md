@@ -1,0 +1,491 @@
+# ReelVault Codebase Guide
+
+> Last reviewed: August 4, 2026  
+> Review basis: all project source and configuration files, all documentation, the live SQLite schema and aggregate contents, binary/media metadata, generated/cache directories, the CLI surface, the FastAPI routes, the frontend production build, ESLint, and the backend test suite.
+
+## Executive summary
+
+ReelVault is a local-first social-video archive and editorial workbench. It indexes video files already stored on disk or in iCloud Drive without copying them, generates cached thumbnails, lets a user draft and approve social captions, optionally asks Google Gemini to analyze videos and propose copy, and exposes a deliberately strict “ready” queue for future posting automation. The same SQLite database is used by a React dashboard, a FastAPI API, and a Typer CLI.
+
+This is not currently a social-network publishing bot. It does not authenticate with Instagram, TikTok, Facebook, YouTube, or LinkedIn, schedule posts, or upload content to those platforms. Its boundary ends at preparing and exposing approved content.
+
+The project is beyond a generated skeleton and is being used with real data. It is best described as a functional, local, single-user MVP with several post-MVP usability additions. The core archive/edit/approval path works and is tested; the frontend builds; the database is healthy and populated. It is not production-hardened, packaged, or ready for multi-user or network-exposed use.
+
+## What problem it solves
+
+The intended workflow is:
+
+1. Point ReelVault at an existing tree of reel/video files.
+2. Recursively index supported files in SQLite without moving or duplicating them.
+3. Browse, search, filter, preview, and organize the archive.
+4. Save a manual caption, hashtags, internal notes, status, and approval state per reel.
+5. Optionally upload one reel at a time to Gemini for a summary, suggested caption, hashtags, category, and platform recommendation.
+6. Explicitly copy AI suggestions into user-controlled fields; AI output never automatically replaces manual copy.
+7. Expose only records satisfying all three publishing gates:
+   - `status = 'ready'`
+   - `approved = true`
+   - `final_post_text` is non-empty
+8. Allow a future agent or integration to read that safe queue through the API or CLI.
+
+The visual product is a dark synthwave/retro-arcade dashboard. `Color_Scheme.png` is the palette reference only: deep plum/black, cyan, magenta, orange, and purple glow. The implementation intentionally avoids reproducing the reference image's dense fake analytics layout.
+
+## Current stage and observed state
+
+### Stage assessment
+
+**Current stage: functional personal-use MVP / early beta.**
+
+Evidence that it is functional rather than merely scaffolded:
+
+- The backend has real scanning, persistence, thumbnail generation, iCloud-aware hooks, AI integration, validation endpoints, and tests.
+- The frontend has a complete archive browser and workbench, not a starter screen.
+- The CLI implements the documented agent-facing workflow.
+- The live database passes SQLite's integrity check.
+- The frontend production build succeeds.
+- All six backend tests pass under the installed Miniconda Python 3.13 environment.
+- The data cache shows sustained use against a large personal reel collection.
+
+Evidence that it remains MVP-level:
+
+- There is no root Git repository/history in this workspace, no root `.gitignore`, and no release/deployment pipeline.
+- The frontend is concentrated in a 1,470-line `App.tsx` rather than decomposed into tested components.
+- ESLint currently reports 12 errors and 4 warnings.
+- The backend has no migrations, pagination, authentication, job system, or stale-record reconciliation.
+- Operational documentation is partially stale and some Vite starter artifacts remain.
+- The app assumes a trusted local machine and should not be exposed to a LAN or the public internet.
+
+### Live data snapshot on August 4, 2026
+
+The checked-in/local `data/reelvault.db` currently contains:
+
+| Measure | Observed value |
+|---|---:|
+| Indexed reels | 1,415 |
+| `.mp4` records | 1,401 |
+| `.mov` records | 14 |
+| Total referenced video size | about 19.4 GiB |
+| Draft status | 1,412 |
+| Ready status | 3 |
+| Approved records | 4 |
+| Manual drafts | 4 |
+| Final posts | 3 |
+| Records with notes | 1 |
+| Gemini-analyzed records | 3 |
+| Postable records | 3 |
+| DB records with thumbnail references | 1,306 |
+| JPEG files in thumbnail cache | 1,306 |
+
+The first stored discovery timestamp is May 22, 2026; the newest is August 4, 2026. `PROGRESS.md` records a June 29 recovery at roughly 1,267 reels, but the live database is newer and larger, so the database is the more current source for operational state.
+
+Important data-health observations:
+
+- The database has no duplicate file paths and currently has no record that violates the three-part ready-queue predicate.
+- One approved record is still a draft. Approval and readiness are modeled separately, so that is not inherently unsafe; it is excluded from the ready queue.
+- 261 database records currently point to video paths that do not exist on disk.
+- Five records reference thumbnail filenames that are not present; four thumbnail files are not referenced by any current record.
+- The configured source folder currently contains 1,159 supported video files. Of 1,414 database paths under that root, 1,154 currently exist and 260 are stale; one additional stale record points to the workspace's former iCloud location. Five supported files in the source are not yet represented by an existing matching database path. This confirms that scanning adds/updates records but never removes records for deleted or moved files.
+- SQLite uses the default `DELETE` journal mode, has no foreign keys (there is only one table), and has only the implicit unique index on `filepath`.
+
+The live database and thumbnail cache are user data, not fixtures. Back them up before any cleanup or migration work.
+
+## Architecture
+
+```text
+Existing video tree (currently iCloud Drive)
+        |
+        | recursive scan; no video copies
+        v
+FastAPI scanner + ffprobe/ffmpeg/Quick Look
+        |
+        +--------> data/thumbnails/*.jpg
+        |
+        v
+data/reelvault.db (SQLite, single `reels` table)
+        ^                    ^
+        |                    |
+React/Vite dashboard     Typer/Rich CLI
+        |
+        +---- optional per-video upload ----> Gemini Files API
+                                               |
+                                               +-- JSON suggestions saved to AI fields
+                                                   and uploaded file deleted afterward
+```
+
+The backend is the web application's source of truth. The CLI imports the same backend modules directly and reads/writes the same configured database; it does not call the HTTP API.
+
+### Backend stack
+
+- Python 3.10-3.13 is the documented range; the verified working interpreter is Miniconda Python 3.13.13.
+- FastAPI provides the local HTTP API.
+- Raw `sqlite3` provides persistence; there is no ORM or migration framework.
+- `ffprobe` extracts duration.
+- `ffmpeg` and macOS `qlmanage` generate thumbnails.
+- `google-genai` implements Gemini Files API upload and multimodal analysis.
+- `python-dotenv` loads the root `.env`.
+
+### Frontend stack
+
+- React 19 + TypeScript 6 + Vite 8.
+- Tailwind CSS 4 through the Vite plugin.
+- `lucide-react` for icons.
+- No router or state-management library; the application uses local React state and tab state inside `App.tsx`.
+- Vite proxies `/api`, `/videos`, and `/thumbnails` to FastAPI during development.
+
+### Persistence model
+
+`backend/app/database.py` creates a single `reels` table if it does not exist. Each row combines four concerns:
+
+- File identity/metadata: filename, unique absolute filepath, extension, size, duration, timestamps, thumbnail.
+- Editorial state: status, approval, manual caption, final caption, hashtags, notes.
+- AI state: summary, suggested caption/hashtags, category, platform, analysis timestamp.
+- Lifecycle state: posted and archived timestamps.
+
+There are five intended statuses: `draft`, `needs_review`, `ready`, `posted`, and `archived`.
+
+There are no database-level `CHECK` constraints for status or ready-state validity. The ready queue itself is safe because its SQL always re-applies all three gates, even if a malformed record enters the table.
+
+## Repository map
+
+### Root
+
+- `.env` — active local configuration. It may contain a real Gemini key. Never print or commit it.
+- `.env.example` — configuration template; presently aligned with the active variable names.
+- `README.md` — primary setup and feature guide. Useful, but it predates some later folder, Quick Look, autosave, iCloud, and batch-analysis work.
+- `DETAIL.md` — original build specification and acceptance criteria. Treat it as product intent, not a precise description of current code.
+- `PROGRESS.md` — June 29 recovery and feature log. It describes the most recent documented development session but is behind the current live database.
+- `SESSION_NOTES.md` — May 26 Gemini model migration notes.
+- `ChatGPT-Reel Archive Dashboard.md` — exported design conversation and original prompt history. It is provenance/reference material, not runtime documentation.
+- `Color_Scheme.png` — 1536×1024 palette/mood reference.
+- `cody.txt` — informal startup notes; it contains a typo referring to `stt.sh` even though the real launcher is `start.sh`.
+- `start.sh` — local development orchestrator. Loads `.env`, chooses a Python with `uvicorn` and `typer`, starts FastAPI with reload, starts Vite, opens the browser on macOS, and cleans up child processes on exit.
+- `.pytest_cache/` and `.DS_Store` files — generated local artifacts with no application role.
+
+### `backend/`
+
+- `app/settings.py` — loads `.env`, anchors relative paths at the project root, cleans shell-escaped paths, and normalizes legacy `gemini-1.5-pro` to `gemini-2.5-flash`.
+- `app/database.py` — creates the database directory/table and yields row-dictionary SQLite connections.
+- `app/models.py` — all SQL CRUD, filtering, metadata-preserving upsert, ready queue, counts, and missing-thumbnail queries.
+- `app/schemas.py` — Pydantic response/update models.
+- `app/scanner.py` — recursive video discovery, stat metadata, duration probing, metadata upsert, and thumbnail backfill.
+- `app/icloud.py` — optional PyObjC/Foundation checks and on-demand iCloud downloads.
+- `app/thumbnails.py` — deterministic hash-suffixed cache names, Quick Look generation, PNG-to-JPEG conversion, ffmpeg fallback, and iCloud prefetch call.
+- `app/gemini_service.py` — Gemini upload/poll/analyze/parse/delete lifecycle. It requests structured JSON and preserves malformed text in a fallback result.
+- `app/main.py` — app initialization, logging, permissive local CORS, static video/thumbnail mounts, routers, and root metadata endpoint.
+- `app/routes/health.py` — environment/health summary.
+- `app/routes/reels.py` — scan, stats, list/filter, thumbnail, video, update, AI, and lifecycle endpoints.
+- `app/routes/queue.py` — strict ready queue endpoint.
+- `tests/` — six tests covering schema creation, nonduplicating scan, field persistence, ready validation, Gemini-offline behavior, and legacy model normalization.
+- `requirements.txt` — unconstrained-minimum backend dependencies. There is no lock file.
+- `__pycache__/` — generated Python bytecode for 3.13/3.14; not source.
+
+### `frontend/`
+
+- `src/App.tsx` — nearly the entire UI and interaction layer: navigation, filters, cards, preview, editing, autosave, lifecycle actions, folder tree, settings, selection, queue status, Quick Look, and toasts.
+- `src/api.ts` — TypeScript API contracts and fetch wrapper.
+- `src/folders.ts` — derives a nested folder tree from absolute reel paths and performs client-side subtree filtering.
+- `src/useAnalysisQueue.ts` — in-memory sequential Gemini queue with a 2.5-second gap, duplicate prevention, per-item state, and completion reporting.
+- `src/index.css` — Tailwind import, theme tokens, fonts, animations, scanlines, global layout, and shared synthwave utilities.
+- `src/main.tsx` — React mount under Strict Mode.
+- `src/App.css` — unused Vite starter CSS; it is not imported.
+- `src/assets/hero.png`, `react.svg`, and `vite.svg` — unused starter assets.
+- `public/favicon.svg` and `public/icons.svg` — public SVG assets; the favicon is referenced, while `icons.svg` is not referenced by source.
+- `index.html` — Vite shell. Its title is still the generic `frontend`.
+- `package.json` / `package-lock.json` — frontend scripts and locked dependency tree. Package name/version are still `frontend` / `0.0.0`.
+- `vite.config.ts` — React, Tailwind, port, and backend proxy configuration.
+- TypeScript and ESLint configs — strict compilation and modern React lint rules.
+- `frontend/README.md` — untouched Vite template documentation, not ReelVault documentation.
+- `node_modules/` — installed generated dependencies, about 164 MB.
+- `dist/` — generated production build, about 316 KB after the verified build.
+
+### `cli/`
+
+- `reelctl.py` — 396-line Typer/Rich command-line interface. It amends `sys.path` to import `backend/app`, initializes the same database, and implements scan/list/show/edit/approve/status/analyze/queue/export commands.
+
+### `data/`
+
+- `reelvault.db` — active SQLite user database, about 807 KB.
+- `thumbnails/` — active JPEG cache, roughly 78 MB and 1,306 files at review time.
+
+### `reels/`
+
+- Contains only the tiny three-second `roofing_before_after.mp4` sample in this workspace.
+- It is not the active source while `.env` points `REELS_FOLDER` to the iCloud Drive collection.
+
+## Implemented user experience
+
+### Archive and navigation
+
+The left sidebar exposes All Reels, Drafts, Needs Review, Ready Queue, Posted, Archived, and Settings. Status counts come from the backend. All Reels also has a client-derived folder panel with nested counts and subtree selection.
+
+Search covers filename, full path, manual caption, final caption, hashtags, and notes. Additional filters select records with/without final captions and with/without AI summaries. Status tabs are server-filtered; folder filtering is applied client-side to the returned list.
+
+Each reel card includes a portrait thumbnail, blurred ambient backdrop, duration, status, approval badge, relative folder, caption/notes preview, hashtags, Quick Look, AI action, and conditional Ready action. Hovering replaces the image with a muted looping video stream.
+
+### Workbench and saving
+
+Selecting a reel opens a fixed-width workbench containing video playback, file metadata, status, approval, manual caption, hashtags, internal notes, AI output, final caption, and lifecycle actions.
+
+The editor:
+
+- Fetches a fresh record when opened.
+- Tracks a baseline and computes field changes.
+- Autosaves approximately 600 ms after edits.
+- Saves before closing or switching records.
+- Supports Cmd/Ctrl+S.
+- Updates the visible card in place and refreshes counts.
+- Keeps manual, AI-suggested, and final captions separate.
+
+### Video and thumbnails
+
+The backend recognizes `.mp4`, `.mov`, `.m4v`, `.avi`, `.webm`, and `.mkv`. It recursively walks the configured source, normalizes paths to Unicode NFC, uses absolute filepath as the unique identity, and updates only file metadata on rescan. Editorial and AI fields are preserved.
+
+Duration is reused once nonzero, otherwise obtained through `ffprobe` when the file is believed to be local. Thumbnail names combine the video stem and the first eight characters of an MD5 of the full path, preventing most same-name collisions. Generation tries macOS Quick Look first and ffmpeg at 0.5 seconds then 0.0 seconds.
+
+The dashboard starts an automatic missing-thumbnail backfill once per page load, in batches of 12. It stops when none remain or a batch generates zero. A Quick Look request also attempts a missing thumbnail.
+
+### Gemini analysis
+
+Gemini is optional. With no key the rest of the application remains available, health reports offline mode, and AI controls are hidden or return clear errors.
+
+With a key, the backend:
+
+1. Ensures the selected file is locally available if Foundation support exists.
+2. Uploads the file through the Gemini Files API.
+3. Polls processing for up to five minutes.
+4. Requests JSON using the configured model (`gemini-2.5-flash` in the current environment).
+5. Saves the summary, proposed caption/hashtags, category, platform, and analysis time.
+6. Deletes the uploaded Gemini file in a `finally` block.
+
+The browser queue is client-side and sequential. It processes one video at a time with a 2.5-second pause, so closing or refreshing the page loses queued work. It is not a durable backend job queue.
+
+The current AI prompt is opinionated toward roofing/construction/home-services marketing unless the video clearly concerns another subject.
+
+## HTTP API
+
+The effective API surface is:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/health` | Paths, Gemini state/model, and source-folder state |
+| `POST` | `/api/reels/scan` | Synchronous recursive scan/upsert |
+| `GET` | `/api/reels/stats` | Counts by workflow status |
+| `GET` | `/api/reels` | List with status, approval, search, final-post, and AI filters |
+| `POST` | `/api/reels/thumbnails/backfill` | Generate a bounded batch of missing thumbnails |
+| `GET` | `/api/reels/{id}` | Fetch one record |
+| `PATCH` | `/api/reels/{id}` | Update editable/editor and AI fields |
+| `POST` | `/api/reels/{id}/thumbnail` | Generate one thumbnail |
+| `GET` | `/api/reels/{id}/video` | Serve one source video by ID |
+| `POST` | `/api/reels/{id}/analyze` | Run Gemini analysis synchronously |
+| `POST` | `/api/reels/{id}/use-ai-caption` | Copy AI caption into final caption |
+| `POST` | `/api/reels/{id}/use-ai-hashtags` | Copy AI hashtags into active hashtags |
+| `POST` | `/api/reels/{id}/mark-ready` | Validate final text, approve, and mark ready |
+| `POST` | `/api/reels/{id}/mark-posted` | Mark posted and timestamp it |
+| `POST` | `/api/reels/{id}/archive` | Archive and timestamp it |
+| `GET` | `/api/queue/ready` | Strictly filtered agent-facing posting queue |
+
+FastAPI also exposes `/docs`, `/redoc`, and `/openapi.json`. `/videos` statically mounts the entire configured source tree and `/thumbnails` mounts the cache; the current UI mostly uses the ID-based video route.
+
+The original `DETAIL.md` asks for `POST /api/scan`, but the implemented and frontend-used path is `POST /api/reels/scan`.
+
+## CLI
+
+Run commands from the project root:
+
+```bash
+python cli/reelctl.py --help
+python cli/reelctl.py scan
+python cli/reelctl.py list
+python cli/reelctl.py show 123
+python cli/reelctl.py set-post 123 "Final caption"
+python cli/reelctl.py set-hashtags 123 "#roofing #dallas"
+python cli/reelctl.py approve 123
+python cli/reelctl.py status 123 ready
+python cli/reelctl.py analyze 123
+python cli/reelctl.py next-ready
+python cli/reelctl.py export-ready --format json
+python cli/reelctl.py export-ready --format csv --output exports/ready.csv
+```
+
+`status ... ready` requires a final caption and auto-approves. JSON/CSV export includes every database column for records in the strict queue. Rich's presentation makes most commands human-friendly; `export-ready` is the cleanest machine-readable command.
+
+## Configuration and startup
+
+Supported root environment variables:
+
+| Variable | Meaning | Current/default pattern |
+|---|---|---|
+| `REELS_FOLDER` | Existing source video tree | Current local `.env` points to an iCloud Drive folder |
+| `DATABASE_PATH` | SQLite file | `./data/reelvault.db` |
+| `THUMBNAILS_FOLDER` | Generated image cache | `./data/thumbnails` |
+| `GEMINI_API_KEY` | Optional secret | Blank disables AI gracefully |
+| `GEMINI_MODEL` | Configurable model name | `gemini-2.5-flash` |
+| `APP_HOST` | FastAPI bind host | `127.0.0.1` |
+| `APP_PORT` | FastAPI port | `8000` |
+| `FRONTEND_PORT` | Vite port | `5173` |
+
+Relative paths are resolved against the repository root, not the current shell directory.
+
+Normal setup:
+
+```bash
+pip install -r backend/requirements.txt
+npm install --prefix frontend
+cp .env.example .env
+# Edit .env, especially REELS_FOLDER and optionally GEMINI_API_KEY.
+./start.sh
+```
+
+The launcher currently finds the installed Miniconda `python` after the default Homebrew `python3` fails dependency preflight. Direct backend/test commands should therefore use the environment where requirements were installed. The active verified interpreter path at review time was:
+
+```text
+/Users/cojovi/homebrew/Caskroom/miniconda/base/bin/python
+```
+
+For individual services:
+
+```bash
+PYTHONPATH=backend python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+npm run dev --prefix frontend
+```
+
+## Verification results
+
+### Backend
+
+Verified command, using the installed Miniconda environment:
+
+```bash
+PYTHONPATH=backend /Users/cojovi/homebrew/Caskroom/miniconda/base/bin/python -m pytest backend/tests -vv
+```
+
+Result: **6 passed** in about 61 seconds. Warnings:
+
+- Starlette reports its `httpx` TestClient integration as deprecated in favor of `httpx2`.
+- Pydantic reports class-based `Config` as deprecated; `ConfigDict` is the forward-compatible replacement.
+
+The scan test is slow because its fake `.mp4` can still enter real Quick Look/ffmpeg thumbnail attempts. The suite does not mock external media tools.
+
+### Frontend build
+
+```bash
+npm run build --prefix frontend
+```
+
+Result: **passes**. The output is roughly 244 KB JavaScript and 49 KB CSS before gzip. Vite emitted one CSS warning because the Google Fonts `@import` follows Tailwind's import; CSS imports must precede other rules. Node also emitted a `module.register()` deprecation warning from the toolchain.
+
+### Frontend lint
+
+```bash
+npm run lint --prefix frontend
+```
+
+Result: **fails with 12 errors and 4 warnings**. Main categories:
+
+- Eleven uses of explicit `any`/unsafe typing, including error handling and tab/filter objects.
+- React's `set-state-in-effect` rule flags the loading and tab-reset effects.
+- Four missing-hook-dependency warnings around `loadData`, `addToast`, the editing record, and thumbnail backfill inputs.
+
+### Database and media
+
+- `PRAGMA integrity_check`: `ok`.
+- All 1,306 cached thumbnail files identify as JPEG images.
+- `Color_Scheme.png` is a valid 1536×1024 RGBA PNG.
+- The local sample reel is a valid three-second MP4.
+- FFmpeg 8.1.1, ffprobe 8.1.1, and macOS `qlmanage` are installed.
+
+## Important invariants and safety properties
+
+The strongest implemented safety property is the ready-queue query itself. Both API and CLI ultimately use SQL that requires ready status, approval, and nonblank final copy. Future posting agents should consume `/api/queue/ready` or `reelctl export-ready`, not infer readiness from a single field.
+
+Other useful properties:
+
+- File path is unique and normalized to Unicode NFC.
+- Rescanning updates only file-derived metadata and preserves editorial/AI work.
+- Gemini results stay in separate fields until the user explicitly adopts them.
+- Gemini uploads are deleted after inference, including most failure paths.
+- Missing Gemini configuration, ffprobe, ffmpeg, or Quick Look generally degrades gracefully.
+- Archive is a state transition, not file deletion.
+
+## Known gaps and risks
+
+### High priority
+
+1. **The generic PATCH endpoint can bypass workflow validation.** `PATCH /api/reels/{id}` accepts `status` and `approved` directly, and the UI's status selector autosaves through it. A caller can create `status='ready'` without a final caption. The strict queue remains safe because its query rechecks all gates, but the record/UI state can become misleading. Centralize validation in the model/service layer and reject invalid status values.
+
+2. **Scanning never marks or removes missing source files.** The current 261 stale paths are the concrete result. Add `is_missing`/`last_seen_at` fields and a reconciliation step; avoid hard deletion by default because rows contain user-authored work.
+
+3. **The app is intentionally local but not secured.** CORS allows every origin, there is no authentication, the entire reels directory is statically mounted, and mutating endpoints are open. Keep `APP_HOST=127.0.0.1`; do not expose it through port forwarding, a public tunnel, or a nontrusted LAN without an auth and serving redesign.
+
+4. **Secrets and user data lack root ignore rules.** This directory is not currently a Git repository, but if it becomes one, `.env`, `data/reelvault.db`, `data/thumbnails`, `.DS_Store`, caches, and possibly `reels/` could be committed accidentally. Add a root `.gitignore` before initializing or publishing a repository.
+
+5. **iCloud behavior is only partially provisioned.** `icloud.py` needs PyObjC's `Foundation`, but it is not in `requirements.txt` and is missing from the verified runtime. In that condition the helper assumes files are available and cannot explicitly request downloads. Make PyObjC a documented macOS optional dependency or implement a supported fallback and surface availability in health.
+
+### Medium priority
+
+6. **Long work runs inside synchronous request handlers.** Folder scans, thumbnail batches, iCloud waits, Gemini uploads, five-minute polling, and model calls can occupy server workers. The browser queue is not durable. Move these operations to tracked background jobs if reliability matters.
+
+7. **No pagination or virtualization.** The API returns full rows and the UI renders all matching cards. It works at the current scale but sends many large text fields and creates a heavy DOM. Add lightweight list projections, pagination, and/or virtualized cards.
+
+8. **SQLite concurrency is minimally configured.** There is no WAL mode, busy timeout, retry policy, transaction/service boundary, backup command, or schema migration system. This matters because the CLI and API are intended to share the file concurrently.
+
+9. **Frontend maintainability and lint debt.** `App.tsx` owns most behavior and presentation. Split it into archive, card, folder tree, workbench, settings, toast, and queue components; then fix hook dependencies and remove `any`.
+
+10. **Test coverage is backend-only and narrow.** There are no frontend tests, end-to-end browser tests, CLI tests, Gemini mocks, malformed-response route tests, iCloud tests, thumbnail fallback tests, filter tests, or stale-file tests.
+
+11. **API error wrapping can obscure intended status codes.** Broad `except Exception` blocks can catch `HTTPException` raised inside a `try` and turn it into a 500. Keep expected validation exceptions outside broad wrappers or explicitly re-raise them.
+
+12. **Data model omits AI quality notes.** The Gemini prompt requests `quality_notes`, and the parser returns it, but the schema/table/save logic discard it. Add a field if human-review guidance is part of the product requirement.
+
+### Lower priority / cleanup
+
+13. Replace Vite starter identity: package name/version, page title, `frontend/README.md`, unused `App.css`, unused starter images, and unused public `icons.svg`.
+14. Move the Google Fonts import before Tailwind or self-host fonts to eliminate the build warning and avoid an online font dependency in an otherwise local-first UI.
+15. Pin backend versions with a reproducible lock file and document the preferred virtual environment.
+16. Add database indexes if filtered queries become slow, especially on `status`, `approved`, and `updated_at`.
+17. Validate and normalize hashtags/platform/category outputs rather than storing arbitrary strings.
+18. Use timezone-aware UTC timestamps; current code uses naive local `datetime.now().isoformat()` values.
+19. Clarify whether direct approval without ready status is desired, and reset `posted_at`/`archived_at` when moving records back to earlier states if lifecycle accuracy matters.
+20. Consider whether hover-previewing remote/iCloud videos should require an explicit action to avoid many concurrent file fetches.
+
+## Recommended next milestones
+
+### Milestone 1: stabilize the existing MVP
+
+- Add a root `.gitignore` and define which local data is backed up versus versioned.
+- Centralize status/approval/final-caption validation.
+- Add stale-file reconciliation without deleting editorial data.
+- Fix frontend lint and the CSS import warning.
+- Record iCloud capability in health and document/install the optional dependency.
+- Update the README and replace starter metadata/docs/assets.
+
+### Milestone 2: make operations dependable
+
+- Add migrations, WAL/busy timeout, backups, and recovery instructions.
+- Introduce a durable analysis/thumbnail job model with progress and retry.
+- Add pagination/list projections and frontend virtualization.
+- Add API, CLI, frontend component, and end-to-end tests.
+
+### Milestone 3: prepare automation safely
+
+- Define a minimal machine-readable ready-item contract rather than exporting every DB column.
+- Add claim/lease/idempotency semantics so two agents cannot post the same reel.
+- Add platform/post identifiers and a verified posted transition.
+- Add authentication and eliminate broad static mounts before any network exposure.
+- Only then integrate actual social-platform publishing or scheduling.
+
+## Guidance for future Codex/agent work
+
+- Treat `DETAIL.md` as the original specification, `PROGRESS.md`/`SESSION_NOTES.md` as historical context, and source plus the live database as current truth.
+- Do not alter or delete `data/reelvault.db`, `data/thumbnails`, the configured iCloud source, or `.env` unless the user explicitly asks.
+- Never expose the Gemini API key in logs, patches, or documentation.
+- Preserve manual captions and notes during scans, migrations, and AI operations.
+- Preserve the ready-queue predicate at every automation boundary.
+- Use the Miniconda environment or install `backend/requirements.txt` into an explicit virtual environment before running backend commands.
+- Run both backend tests and the frontend build for cross-stack changes; run lint and report existing versus newly introduced failures.
+- Avoid using the live database in tests. Existing tests correctly redirect paths before importing settings.
+- If changing the schema, implement an explicit migration; `CREATE TABLE IF NOT EXISTS` will not add columns to existing databases.
+- If testing scans against the live source, remember that the operation can trigger thumbnail generation and iCloud downloads even though it does not copy videos into the project.
+
+## Bottom line
+
+ReelVault already accomplishes its central promise: it turns a large local/iCloud video collection into a searchable editorial archive with persistent drafts, optional Gemini assistance, explicit human approval, and a safe outbound queue. The project is useful today on its owner's Mac. Its next phase should focus less on adding features and more on protecting the real data now accumulated around it: enforce workflow rules centrally, reconcile missing files, harden local operations, reduce frontend debt, and establish reproducible version control and backups before adding a real posting agent.
