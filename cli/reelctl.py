@@ -287,7 +287,10 @@ def analyze_reel(reel_id: int = typer.Argument(..., help="The database ID of the
         console.print(f"[bold magenta]Starting Gemini Video Analysis for reel {reel_id}...[/bold magenta]")
         console.print("[dim]This uploads the local file temporary and processes it. Please wait...[/dim]")
         
-        analysis = analyze_video_with_gemini(r["filepath"])
+        from app.icloud import ensure_icloud_downloaded
+        if not ensure_icloud_downloaded(r["filepath"], timeout=60):
+            raise GeminiServiceError("Video is not downloaded. Download it in Finder and retry.")
+        analysis = analyze_video_with_gemini(r["filepath"], reel_id=reel_id)
         
         # Save analysis
         tags_list = analysis.get("hashtags", [])
@@ -295,6 +298,7 @@ def analyze_reel(reel_id: int = typer.Argument(..., help="The database ID of the
         
         update_data = {
             "ai_summary": analysis.get("summary", ""),
+            "ai_quality_notes": analysis.get("quality_notes", ""),
             "ai_suggested_post_text": analysis.get("suggested_post", ""),
             "ai_suggested_hashtags": tags_str,
             "ai_category": analysis.get("category", "Showcase"),
@@ -391,6 +395,25 @@ def export_ready(
     except Exception as e:
         err_console.print(f"[bold red]Failed to export ready queue:[/bold red] {e}")
         sys.exit(1)
+
+@app.command(name="describe-missing")
+def describe_missing(retry: bool = typer.Option(False, "--retry")):
+    """Queue rough descriptions; the running backend processes them without cloud downloads."""
+    from app.archive import enqueue_missing
+    print(json.dumps({"queued": enqueue_missing(retry=retry)}))
+
+@app.command(name="archive-status")
+def archive_status():
+    """Machine-readable scan, description, availability and estimated usage status."""
+    from app.archive import status
+    print(json.dumps(status(), indent=2))
+
+@app.command(name="pause-descriptions")
+def pause_descriptions(resume: bool = typer.Option(False, "--resume")):
+    """Pause quick descriptions, or resume them with --resume."""
+    from app.archive import set_state
+    set_state('paused', not resume)
+    print(json.dumps({"paused": not resume}))
 
 if __name__ == "__main__":
     app()

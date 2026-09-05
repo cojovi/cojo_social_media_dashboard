@@ -15,7 +15,9 @@ def get_all_reels(
     approved: Optional[bool] = None,
     search: Optional[str] = None,
     has_final_post: Optional[bool] = None,
-    has_ai_summary: Optional[bool] = None
+    has_ai_summary: Optional[bool] = None,
+    availability: Optional[str] = None,
+    has_quick_summary: Optional[bool] = None
 ) -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
         query = "SELECT * FROM reels WHERE 1=1"
@@ -30,9 +32,9 @@ def get_all_reels(
             params.append(1 if approved else 0)
             
         if search:
-            query += " AND (filename LIKE ? OR filepath LIKE ? OR manual_post_text LIKE ? OR final_post_text LIKE ? OR hashtags LIKE ? OR notes LIKE ?)"
+            query += " AND (filename LIKE ? OR filepath LIKE ? OR manual_post_text LIKE ? OR final_post_text LIKE ? OR hashtags LIKE ? OR notes LIKE ? OR ai_summary LIKE ? OR quick_summary LIKE ? OR quick_tags LIKE ? OR quick_category LIKE ?)"
             like_val = f"%{search}%"
-            params.extend([like_val, like_val, like_val, like_val, like_val, like_val])
+            params.extend([like_val] * 10)
             
         if has_final_post is not None:
             if has_final_post:
@@ -46,8 +48,15 @@ def get_all_reels(
             else:
                 query += " AND (ai_summary IS NULL OR ai_summary = '')"
                 
+        if availability:
+            query += " AND storage_status = ?"
+            params.append(availability)
+        if has_quick_summary is not None:
+            query += " AND COALESCE(quick_summary, '') " + ("!= ''" if has_quick_summary else "= ''")
+        if status == 'ready':
+            query += " AND approved = 1 AND length(trim(COALESCE(final_post_text, ''), char(9)||char(10)||char(13)||' ')) > 0 AND storage_status != 'missing'"
         # Order by discovered_at descending
-        query += " ORDER BY discovered_at DESC"
+        query += " ORDER BY discovered_at DESC, id DESC"
         
         cursor = conn.cursor()
         cursor.execute(query, params)
@@ -177,7 +186,7 @@ def update_reel(reel_id: int, update_data: Dict[str, Any]) -> bool:
     allowed_fields = [
         "status", "approved", "manual_post_text", "final_post_text", "hashtags", "notes",
         "ai_summary", "ai_suggested_post_text", "ai_suggested_hashtags", "ai_category",
-        "ai_platform_suggestion", "ai_last_analyzed_at", "posted_at", "archived_at", "thumbnail_path"
+        "ai_platform_suggestion", "ai_last_analyzed_at", "posted_at", "archived_at", "thumbnail_path", "ai_quality_notes"
     ]
     
     # Filter only allowed and convert boolean to integer for SQLite
@@ -201,6 +210,15 @@ def update_reel(reel_id: int, update_data: Dict[str, Any]) -> bool:
     
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute("SELECT * FROM reels WHERE id=?", (reel_id,)).fetchone()
+        if not current:
+            return False
+        merged = dict(current) | update_data
+        if merged['status'] not in {'draft', 'needs_review', 'ready', 'posted', 'archived'}:
+            raise ValueError("Invalid workflow status.")
+        if merged['status'] == 'ready' and not (merged.get('final_post_text') or '').strip():
+            raise ValueError("Cannot mark reel as ready without final post caption.")
         cursor.execute(f"UPDATE reels SET {', '.join(query_fields)} WHERE id = ?", params)
         conn.commit()
         return cursor.rowcount > 0
@@ -214,7 +232,8 @@ def get_ready_queue() -> List[Dict[str, Any]]:
             WHERE status = 'ready' 
               AND approved = 1 
               AND final_post_text IS NOT NULL 
-              AND final_post_text != ''
+              AND length(trim(final_post_text, char(9)||char(10)||char(13)||' ')) > 0
+              AND storage_status != 'missing'
             ORDER BY updated_at ASC
             """
         )
@@ -245,6 +264,9 @@ def get_status_counts() -> Dict[str, int]:
             total += count
             
         counts["all"] = total
+        counts["ready"] = conn.execute("""SELECT COUNT(*) FROM reels WHERE status='ready' AND approved=1
+            AND length(trim(COALESCE(final_post_text,''),char(9)||char(10)||char(13)||' '))>0
+            AND storage_status != 'missing'""").fetchone()[0]
         return counts
 
 

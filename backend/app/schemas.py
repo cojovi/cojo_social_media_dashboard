@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Dict, Any
 
 class ReelResponse(BaseModel):
@@ -27,8 +27,18 @@ class ReelResponse(BaseModel):
     posted_at: Optional[str] = None
     archived_at: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    storage_status: str = 'unknown'
+    last_seen_at: Optional[str] = None
+    source_version: Optional[str] = None
+    quick_summary: Optional[str] = None
+    quick_tags: Optional[str] = None
+    quick_category: Optional[str] = None
+    quick_summary_source: Optional[str] = None
+    quick_summary_model: Optional[str] = None
+    quick_summary_at: Optional[str] = None
+    ai_quality_notes: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 class ReelUpdate(BaseModel):
     status: Optional[str] = None
@@ -68,6 +78,8 @@ class ScanResponse(BaseModel):
     scanned_count: int
     added_count: int
     updated_count: int
+    missing_count: int = 0
+    skipped_count: int = 0
 
 class ThumbnailBackfillResponse(BaseModel):
     processed: int

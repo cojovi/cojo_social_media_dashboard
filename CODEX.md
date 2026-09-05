@@ -1,3 +1,37 @@
+# September 4, 2026 archive upgrade — current behavior
+
+Read [README.md](README.md) for operation and [ARCHIVE_DESIGN.md](ARCHIVE_DESIGN.md) for the review, storage recommendation, pricing, and limitations. The August review below is retained as a historical baseline and no longer describes all current behavior.
+
+Current architecture additions:
+
+- `backend/app/archive.py`: backend-owned startup/periodic scan loops, a SQLite quick-description queue, process lock, crash leases, retry/backoff, pause, and estimate limits.
+- `backend/app/quick_summary.py`: three small local frames or one cached thumbnail; visual-only labels via Flash-Lite; no automatic hydration.
+- `backend/app/usage.py`: recorded input/output/thinking tokens and model-specific paid-tier estimates. Old calls are not retroactively costed.
+- `backend/app/routes/archive.py`: archive status, queue missing/retry, pause/resume.
+- `frontend/src/ArchivePanel.tsx`: storage, scan, queue and usage visibility.
+- Database: explicit additive migration with backup of populated pre-upgrade databases, WAL, busy timeout, foreign keys for job deletion, `summary_jobs`, `ai_usage`, `archive_state`, and per-reel storage/quick-description fields.
+
+Operational invariants:
+
+- Preserve manual captions, final captions, notes, and approval during scans and AI work.
+- Scan only metadata. Never hydrate all sources for discovery or thumbnail backfill.
+- Do not silently create a missing configured source folder.
+- A partial/failed scan must not mark its unseen entries missing.
+- Quick descriptions must identify their evidence source; a thumbnail description is not a full video review.
+- Missing files retain catalog history. Absolute path remains the identity; provider migration needs deliberate relinking.
+- Quick jobs survive browser/backend restarts. The older **full video review** selection queue still requires its browser tab to stay open.
+- The quick daily limit is an app estimate limit, not an account billing cap. No automatic fallback to a more expensive model.
+- The source can stay in iCloud; no files have been moved or automatically evicted. Direct Dropbox/Drive API cache adapters are future work.
+- Main source on this Mac: iCloud `SnapIGTik Download`. Defaults scan at startup and every 900 seconds (15 minutes), settle new writes for 60 seconds, and automatically queue undescribed backlog/new arrivals. Dashboard refresh: ten seconds.
+- Current ready queue additionally excludes files marked missing and rejects whitespace-only captions. PATCH/CLI validation shares the model layer.
+- No broad source-folder static mount. Originals are served by reel ID with bounded explicit hydration. Keep the server local; no authentication has been added.
+
+Validation for this upgrade: backend tests include scanning/settling, missing/partial sources, placeholders, unchanged/changed content, cached-thumbnail use, queue leases/deduplication/retries, pause/budget gates, migration preservation, and ready-state rules. Frontend build and lint pass. Browser checks use an isolated QA database to verify search, storage filtering, no automatic video requests, slow-save editing, and pause/resume. A three-request real Gemini pilot succeeded, estimated at $0.0003608 total.
+
+Historical review follows.
+
+---
+
 # ReelVault Codebase Guide
 
 > Last reviewed: August 4, 2026  

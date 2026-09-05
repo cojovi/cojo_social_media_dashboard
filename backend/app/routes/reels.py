@@ -4,7 +4,8 @@ from datetime import datetime
 
 from ..schemas import ReelResponse, ReelUpdate, ScanResponse, StatusCountsResponse, ThumbnailBackfillResponse
 from .. import models
-from ..scanner import scan_reels_folder, backfill_thumbnails
+from ..scanner import backfill_thumbnails
+from ..archive import run_scan
 from ..thumbnails import ensure_thumbnail_for_video
 from ..icloud import ensure_icloud_downloaded
 from ..gemini_service import analyze_video_with_gemini, GeminiServiceError
@@ -15,16 +16,22 @@ router = APIRouter(prefix="/reels", tags=["reels"])
 def trigger_scan():
     """
     Scans the local reels folder and synchronizes it with the SQLite database.
-    Does not duplicate files. Extracts metadata and makes thumbnails.
+    Reads file metadata without downloading videos. Queues inexpensive descriptions.
     """
     try:
-        stats = scan_reels_folder()
+        stats = run_scan()
+        if stats is None:
+            raise HTTPException(409, "A scan is already in progress.")
         return {
             "status": "success",
             "scanned_count": stats["scanned"],
             "added_count": stats["added"],
-            "updated_count": stats["updated"]
+            "updated_count": stats["updated"],
+            "missing_count": stats["missing"],
+            "skipped_count": stats["skipped"]
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Directory scanning failed: {e}")
 
@@ -44,7 +51,9 @@ def get_reels(
     approved: Optional[bool] = Query(None, description="Filter by approved status"),
     search: Optional[str] = Query(None, description="Search term in filename/captions/hashtags"),
     has_final_post: Optional[bool] = Query(None, description="Filter by final caption presence"),
-    has_ai_summary: Optional[bool] = Query(None, description="Filter by AI analysis completion")
+    has_ai_summary: Optional[bool] = Query(None, description="Filter by full AI analysis completion"),
+    availability: Optional[str] = Query(None, pattern="^(local|cloud|missing|unknown)$"),
+    has_quick_summary: Optional[bool] = None
 ):
     """
     Retrieves all indexed reels matching optional filter and search terms.
@@ -55,7 +64,7 @@ def get_reels(
             approved=approved,
             search=search,
             has_final_post=has_final_post,
-            has_ai_summary=has_ai_summary
+            has_ai_summary=has_ai_summary, availability=availability, has_quick_summary=has_quick_summary
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list reels: {e}")
@@ -66,7 +75,7 @@ def trigger_thumbnail_backfill(
 ):
     """
     Generate thumbnails for reels missing them.
-    Pulls each file from iCloud on demand — not a full-library download.
+    Only processes locally available files. Offloaded videos stay offloaded.
     """
     try:
         return backfill_thumbnails(limit=limit)
@@ -114,8 +123,11 @@ def stream_reel_video(reel_id: int):
         raise HTTPException(status_code=404, detail="Reel not found.")
     
     filepath = reel["filepath"]
-    if not Path(filepath).exists():
-        raise HTTPException(status_code=404, detail="Video file does not exist locally.")
+    from ..icloud import storage_status
+    if storage_status(filepath) == 'missing':
+        raise HTTPException(status_code=404, detail="Source file is missing or moved. Its archive entry is preserved.")
+    if not ensure_icloud_downloaded(filepath, timeout=60):
+        raise HTTPException(status_code=503, detail="Cloud download is not ready. Download the video in Finder and try again.")
         
     return FileResponse(filepath)
 
@@ -137,6 +149,10 @@ def update_reel_fields(reel_id: int, payload: ReelUpdate):
         if not success:
             raise HTTPException(status_code=400, detail="Failed to save update.")
         return models.get_reel_by_id(reel_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error writing updates: {e}")
 
@@ -157,7 +173,7 @@ def run_ai_analysis(reel_id: int):
                 detail="Video is not available locally yet. Open Quick Look first or wait for iCloud to download.",
             )
 
-        analysis = analyze_video_with_gemini(reel["filepath"])
+        analysis = analyze_video_with_gemini(reel["filepath"], reel_id=reel_id)
         
         # Format tags as string if list is returned
         tags_list = analysis.get("hashtags", [])
@@ -165,6 +181,7 @@ def run_ai_analysis(reel_id: int):
         
         update_data = {
             "ai_summary": analysis.get("summary", ""),
+            "ai_quality_notes": analysis.get("quality_notes", ""),
             "ai_suggested_post_text": analysis.get("suggested_post", ""),
             "ai_suggested_hashtags": tags_str,
             "ai_category": analysis.get("category", "Showcase"),
@@ -175,6 +192,8 @@ def run_ai_analysis(reel_id: int):
         models.update_reel(reel_id, update_data)
         return models.get_reel_by_id(reel_id)
         
+    except HTTPException:
+        raise
     except GeminiServiceError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

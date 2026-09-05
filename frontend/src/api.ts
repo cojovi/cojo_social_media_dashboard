@@ -23,6 +23,14 @@ export interface Reel {
   ai_last_analyzed_at: string | null;
   posted_at: string | null;
   archived_at: string | null;
+  storage_status: 'local' | 'cloud' | 'missing' | 'unknown';
+  quick_summary: string | null;
+  quick_category: string | null;
+  quick_tags: string | null;
+  quick_summary_source: string | null;
+  quick_summary_model: string | null;
+  quick_summary_at: string | null;
+  ai_quality_notes: string | null;
 }
 
 export interface StatusCounts {
@@ -49,6 +57,8 @@ export interface ScanResult {
   scanned_count: number;
   added_count: number;
   updated_count: number;
+  missing_count: number;
+  skipped_count: number;
 }
 
 export interface ThumbnailBackfillResult {
@@ -56,6 +66,22 @@ export interface ThumbnailBackfillResult {
   generated: number;
   failed: number;
   remaining: number;
+}
+
+export interface ArchiveStatus {
+  scan: { running?: boolean; finished_at?: string; error?: string; added?: number; scanned?: number; skipped?: number };
+  scan_interval_seconds: number;
+  auto_scan: boolean;
+  auto_quick_summary: boolean;
+  quick_model: string;
+  paused: boolean;
+  blocked_reason: string | null;
+  jobs: Record<string, number>;
+  storage: Record<string, number>;
+  described: number;
+  recent_jobs: { reel_id: number; filename: string; status: string; error: string | null }[];
+  usage: { requests: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number;
+    quick_today_usd: number; quick_daily_budget_usd: number; quick_estimate_per_reel_usd: number | null; unpriced_requests: number };
 }
 
 // Global fetch helper with error handling
@@ -83,6 +109,11 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getArchiveStatus: () => apiFetch<ArchiveStatus>('/api/archive'),
+  describeMissing: (reelIds?: number[], retry = false) => apiFetch<{ queued: number }>('/api/archive/describe', {
+    method: 'POST', body: JSON.stringify({ reel_ids: reelIds, retry }),
+  }),
+  pauseDescriptions: (paused: boolean) => apiFetch('/api/archive/pause', { method: 'POST', body: JSON.stringify({ paused }) }),
   getHealth: () => apiFetch<HealthStatus>('/api/health'),
   
   getReels: (params?: {
@@ -91,9 +122,13 @@ export const api = {
     search?: string;
     has_final_post?: boolean;
     has_ai_summary?: boolean;
+    has_quick_summary?: boolean;
+    availability?: string;
   }) => {
     const query = new URLSearchParams();
     if (params) {
+      if (params.availability) query.append('availability', params.availability);
+      if (params.has_quick_summary !== undefined) query.append('has_quick_summary', String(params.has_quick_summary));
       if (params.status) query.append('status', params.status);
       if (params.approved !== undefined) query.append('approved', String(params.approved));
       if (params.search) query.append('search', params.search);

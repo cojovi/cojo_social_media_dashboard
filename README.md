@@ -1,147 +1,90 @@
-# 🔮 ReelVault — Retro-Synthwave Local Social Media Command Center
+# ReelVault
 
-ReelVault is a premium, local-first video reel archiving, AI caption-writing assistant, and approved social media queue manager. It is designed to catalog a local folder of backed-up video reels without duplicating files, generate automated captioning drafts using the official Gemini API, and maintain a strict approval gate for publishing queues.
+A local video archive for finding something worth posting, drafting its caption, and maintaining an approved social queue. React/Vite, FastAPI, SQLite, and a Python CLI share the same catalog. Source videos stay in their existing folders; thumbnails, descriptions, notes, and captions stay on the local SSD.
 
-The app features a custom **dark retro-synthwave/arcade console UI** (deep plum `#08040d` theme, glowing neon borders, scanlines, and bento status grids) and interfaces with a SQLite database shared concurrently with a powerful **Python Typer CLI (`reelctl`)**.
+## Daily workflow
 
----
+1. Add videos anywhere under `REELS_FOLDER`, including subfolders.
+2. Start `./start.sh`. The backend scans at startup and every fifteen minutes while it runs. The dashboard refreshes every ten seconds; **Rescan Folder** also works immediately.
+3. Stable new files are indexed and queued for **quick descriptions** automatically, along with the existing undescribed backlog. Empty files and files modified in the last 60 seconds wait for a later scan.
+4. Search by subject, quick tags, description, filename, caption, or notes. Filter by folder and local/offloaded/missing status. The grid initially renders 60 cards; **Show 60 more** expands it.
+5. Play a promising video using Quick Look, or open its workbench and press Play. Editing and hovering do not preload the video.
+6. Request **Full video review + captions** when you need audio/context and posting suggestions. Write or adopt a final caption and mark it ready.
 
-## 🚀 Key Features
+Only `ready` + `approved` + nonblank final caption + source not marked missing enters the ready queue. Nothing publishes to social platforms automatically.
 
-*   **Zero-Copy Local Scanning**: Indexes local directories (`.mp4`, `.mov`, `.m4v`, `.avi`, `.webm`, `.mkv`) instantly and generates hover-preview thumbnails via `ffmpeg` without moving or duplicating your video files.
-*   **Dual-Interface Design**: Share states, captions, approvals, and data models instantly between a beautiful, glowing Vite-React dashboard and a CLI interface (`reelctl`) designed for developer and AI-agent automation.
-*   **Official Google GenAI Integration**: Uses the new official `google-genai` package to upload files to the Gemini Files API, safely analyze video visual context, write contextual captions, suggest hashtags, and auto-delete files immediately after inference.
-*   **Manual Copy Safeguard**: Gemini output **never** overwrites your hand-written manual captions. The dashboard presents AI suggestions side-by-side with clear "Use AI Caption" copy utilities.
-*   **Strict Queue Gates**: A reel only qualifies for the "Ready Queue" and auto-publishing when `status = 'ready'`, `approved = true`, and a non-empty `final_post_text` exists.
-*   **Elegant Offline Fallback**: Does not crash if `GEMINI_API_KEY` is blank. The UI turns off AI generators gracefully while keeping manual editing and queues fully active.
+## Two different AI workflows
 
----
+| Workflow | Input | Default model | Purpose |
+|---|---|---|---|
+| Quick description | Three 384px stills from a local video; one cached thumbnail if offloaded | `gemini-2.5-flash-lite` | One rough sentence, category, search tags; no audio |
+| Full review | Original video and audio uploaded through Gemini Files API | `gemini-2.5-flash` | Detailed summary, caption, hashtags, platform and review notes |
 
-## 📂 Project Structure
+Quick descriptions are stored in separate `quick_*` fields and never modify your draft, final caption, approval, or full AI suggestions. They run through a SQLite queue, resume after a backend restart, and can be paused under **Settings → Archive automation**. The existing full-review selection queue is browser-based: keep its tab open until it finishes.
 
-```text
-cody_social_media_dash/
-├── backend/                  # FastAPI Application
-│   ├── app/
-│   │   ├── routes/           # Endpoint routers (health, reels, queue)
-│   │   ├── database.py       # SQLite connection and tables init
-│   │   ├── settings.py       # Pydantic environment configurations
-│   │   ├── models.py         # SQLite CRUD query transactions
-│   │   ├── scanner.py        # Video filesystem crawler & ffprobe metrics
-│   │   ├── thumbnails.py     # ffmpeg subprocess frame-extractor
-│   │   └── gemini_service.py # Google GenAI Files API uploading & analysis
-│   ├── tests/                # Pytest unit tests suite
-│   └── requirements.txt      # Python dependencies (fastapi, google-genai, typer...)
-├── frontend/                 # Vite + React + TypeScript + Tailwind CSS v4 Dashboard
-│   ├── src/
-│   │   ├── main.tsx          # React application mount
-│   │   ├── App.tsx           # Full responsive arcade dashboard and player
-│   │   ├── index.css         # Retro synthwave colors, animations & scanlines
-│   │   └── api.ts            # Client HTTP API handlers
-│   ├── package.json          # Node configurations and Tailwind plugins
-│   └── vite.config.ts        # Vite proxy bindings for local serving
-├── cli/
-│   └── reelctl.py            # Executable Typer command-line manager
-├── reels/                    # Mount directory containing your raw video files
-├── data/
-│   ├── thumbnails/           # Auto-generated image previews for video list
-│   └── reelvault.db          # Database file populated by scanning
-├── start.sh                  # Root bash runner (boots backend & frontend concurrently)
-├── DETAIL.md                 # Original specifications
-└── README.md                 # Project user guide
-```
+Offloaded videos with cached thumbnails can be described without a download. Those without a preview wait in **waiting for a local preview**, then retry periodically. Download that specific file in Finder or use Quick Look when you want it processed. Automatic scans and quick descriptions never request cloud downloads, move originals, delete originals, or evict them. Finder/cloud software still manages which originals remain local.
 
----
+Settings shows scan results, storage counts, queue progress, errors, and estimated API usage. **Describe missing / retry** queues unfinished work; **Pause descriptions** takes effect after the current request. The default quick-description estimate limit is $1 per UTC day. It is not a Google account spending cap and excludes full reviews; actual billing and rate limits are set by your API project.
 
-## ⚙️ Installation & Setup
+See [the storage and cost design notes](ARCHIVE_DESIGN.md) for provider recommendations, price calculations, limitations, and the measured pilot.
 
-### 1. System Requirements
-- **Python**: version 3.10 to 3.13
-- **Node.js**: version 18+ (with npm)
-- **FFmpeg & FFprobe**: (Optional, but highly recommended for video thumbnail generation and duration checks). On macOS, install via Homebrew:
-  ```bash
-  brew install ffmpeg
-  ```
+## Setup
 
-### 2. Install Backend Dependencies
-Run pip installer from the backend folder:
+Use Python 3.10+ and a Node version supported by the installed Vite release (the verified workstation runtime is Node 26). Install FFmpeg for local frame extraction; cached-thumbnail descriptions work without it.
+
 ```bash
-pip install -r backend/requirements.txt
-```
-
-### 3. Install Frontend Dependencies
-Run npm installer from the frontend folder:
-```bash
-cd frontend && npm install && cd ..
-```
-
-### 4. Setup Environment Variables
-Copy `.env.example` to `.env` in the project root:
-```bash
+python -m pip install -r backend/requirements.txt
+npm ci --prefix frontend
+# For a NEW setup only; preserve an existing .env and its API key.
 cp .env.example .env
-```
-Ensure the configurations are correct:
-- `REELS_FOLDER`: Absolute path to your local folder of videos. By default, it will create and look in `./reels` in the project root.
-- `GEMINI_API_KEY`: Provide your Google AI Studio API Key to enable video visual parsing. If empty, the app boots in **Offline mode** with AI buttons gracefully informing you key is missing.
-
----
-
-## 🎮 How to Run
-
-Simply boot the orchestrator script from the root workspace:
-```bash
+# Set REELS_FOLDER and optionally GEMINI_API_KEY in .env.
 ./start.sh
 ```
 
-**What happens next?**
-1. FastAPI boots up in the background on `http://127.0.0.1:8000`.
-2. Vite dev (Frontend) server boots concurrently on `http://127.0.0.1:5173`.
-3. The script automatically opens your default web browser to the dashboard.
-4. Hit the **"Rescan Folder"** button in the Settings tab to sync and parse your video folder!
+The dashboard is at [127.0.0.1:5173](http://127.0.0.1:5173). The API is at [127.0.0.1:8000](http://127.0.0.1:8000/docs). On this workstation, requirements are installed in the Miniconda `python`; the launcher discovers it.
 
----
+Without a Gemini key, browsing, scans, editing, and approvals work normally. Cloud downloads require the relevant provider to be running and signed in. macOS dataless-file detection works without PyObjC; an optional installed Foundation bridge can request iCloud downloads explicitly. Playback otherwise uses a bounded child process to trigger the provider's normal read/download behavior.
 
-## 🛠️ Command Line Interface (`reelctl`)
+Configuration lives in `.env`; see [.env.example](.env.example). Relative paths are anchored at the repository root. The existing iCloud `SnapIGTik Download` folder is auto-detected only when `REELS_FOLDER` is omitted. An unavailable configured source is reported as an error and is never silently recreated.
 
-ReelVault features a CLI utility designed for automation scripts and AI agents. It uses the exact same sqlite database configuration.
+## Data and recovery
 
-To execute CLI commands, run `python3 cli/reelctl.py <command>`.
+- `data/reelvault.db`: catalog, editorial work, descriptions, durable jobs, recorded AI usage.
+- `data/thumbnails/`: small cached previews used while originals are offloaded.
+- `data/backups/`: automatic SQLite backups made before additive schema migrations of populated databases.
+- `data/reelvault.worker.lock`: process lock preventing duplicate background workers.
 
-### Available Commands
+SQLite uses WAL and a busy timeout. Missing or moved source files retain their IDs, captions, and notes. Changing a file's contents clears its cached quick description and thumbnail reference for regeneration; manual text and historical full analysis are retained. File identity still depends on absolute path: moving or renaming originals creates new records. Do not migrate the source tree merely by changing the path if you want to retain identities; plan a catalog relink first.
 
-| Command | Usage | Description |
-|---|---|---|
-| **scan** | `python3 cli/reelctl.py scan` | Scans `REELS_FOLDER` and adds newly discovered video reels into the database. |
-| **list** | `python3 cli/reelctl.py list` | Displays indexed reels with ID, filename, status, approved flag, and final caption presence. |
-| **show** | `python3 cli/reelctl.py show <id>` | Prints the full details of a single reel. |
-| **set-post** | `python3 cli/reelctl.py set-post <id> "caption"` | Updates the `final_post_text` (default) or `manual_post_text` for a reel. |
-| **set-hashtags** | `python3 cli/reelctl.py set-hashtags <id> "#tag1 #tag2"` | Updates the hashtags for a reel. |
-| **approve** | `python3 cli/reelctl.py approve <id>` | Sets `approved = 1` for the specified reel. |
-| **status** | `python3 cli/reelctl.py status <id> ready` | Updates the status of the reel (e.g. `ready`, `posted`, `archived`). |
-| **analyze** | `python3 cli/reelctl.py analyze <id>` | Triggers Gemini API file uploading, waits for processing, and writes structured summary/captions. |
-| **next-ready** | `python3 cli/reelctl.py next-ready` | Returns the next postable approved, ready reel in the publishing queue. |
-| **export-ready** | `python3 cli/reelctl.py export-ready --format json` | Exports the publishing queue as JSON or CSV formatted documents. |
+Back up the database with SQLite's backup API while running; do not copy only the `.db` file while WAL writes are active. To restore a migration backup, stop the backend and CLI writers, preserve the current `.db`, `-wal`, and `-shm` files, and restore the chosen backup to `DATABASE_PATH` before restarting. A restart reapplies supported additive migrations. Source videos are never part of these database backups.
 
-*Tip: Use `--help` on any command to view parameter info! (e.g., `python3 cli/reelctl.py set-post --help`)*
+## CLI
 
----
-
-## 🧪 Running Automated Tests
-
-Run the backend pytest tests from the root of your project:
 ```bash
-PYTHONPATH=backend python3 -m pytest backend/tests
+python cli/reelctl.py scan
+python cli/reelctl.py list
+python cli/reelctl.py show 123
+python cli/reelctl.py set-post 123 "Final caption"
+python cli/reelctl.py set-hashtags 123 "#roofing #dallas"
+python cli/reelctl.py status 123 ready
+python cli/reelctl.py analyze 123
+python cli/reelctl.py describe-missing
+python cli/reelctl.py describe-missing --retry
+python cli/reelctl.py archive-status
+python cli/reelctl.py pause-descriptions
+python cli/reelctl.py pause-descriptions --resume
+python cli/reelctl.py next-ready
+python cli/reelctl.py export-ready --format json
 ```
-This isolates tests in temporary virtual folders and verifies database structures, scanning mechanisms, manual-caption overrides, status change locks, and offline fallback responses.
 
----
+`describe-missing` queues work for the running backend. `scan` alone indexes metadata. `archive-status` and `export-ready` produce JSON for agents. The web API exposes equivalent archive controls under `/api/archive` and the posting queue at `/api/queue/ready`.
 
-## 🎨 Visual Design Aesthetic
+## Verification
 
-ReelVault features a premium **Retro Synthwave Arcade Command Center** styling:
-- **Background**: Deep plum-black (`#08040d`) with subtle glassmorphism transparency card layouts.
-- **Accents**: Glowing neon cyan, sunset gradients (`#f472b6` to `#fb923c`), and neon pink pulses.
-- **Atmosphere**: Subtle terminal scanline grid patterns overlaying the workspace.
-- **Metrics Bento**: Micro-counters display total catalogs, drafts, needs-review items, and ready queues for quick operations.
+```bash
+PYTHONPATH=backend python -m pytest backend/tests -q
+npm run build --prefix frontend
+npm run lint --prefix frontend
+```
 
-Enjoy organizing and writing captions in ReelVault! 🔮
+Tests isolate their database, source folder, and API settings. Keep the app on loopback: it is a personal local tool, without multi-user authentication. Cloud API adapters, automatic eviction, social scheduling/publishing, and rename-aware catalog relinking remain future work.

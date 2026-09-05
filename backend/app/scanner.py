@@ -1,160 +1,118 @@
-import os
-import subprocess
-import shutil
-import unicodedata
-from pathlib import Path
-from datetime import datetime
+"""Fast recursive discovery. A scan never reads video bytes or hydrates cloud files."""
 import logging
-from typing import Dict, Any, List
+import os
+import shutil
+import subprocess
+import time
+import unicodedata
+from datetime import datetime, timezone
+from pathlib import Path
 
 from .settings import settings
+from .database import get_db_connection
 from . import models
-from .icloud import is_icloud_file_downloaded
-from .thumbnails import ensure_thumbnail_for_video, generate_thumbnail
+from .icloud import storage_status
+from .thumbnails import generate_thumbnail
 
 logger = logging.getLogger("reelvault.scanner")
-
 VALID_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".webm", ".mkv"}
 
-def is_ffprobe_available() -> bool:
+
+def is_ffprobe_available():
     return shutil.which("ffprobe") is not None
 
+
 def get_video_duration(filepath: str) -> float:
-    """
-    Query ffprobe to get duration in seconds.
-    Returns 0.0 on failure.
-    """
     if not is_ffprobe_available():
         return 0.0
-        
     try:
-        cmd = [
-            "ffprobe",
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            filepath
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        if res.returncode == 0:
-            val = res.stdout.strip()
-            return float(val) if val else 0.0
-        return 0.0
-    except Exception as e:
-        logger.error(f"Error reading duration via ffprobe for {filepath}: {e}")
+        result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                 "-of", "default=noprint_wrappers=1:nokey=1", filepath],
+                                capture_output=True, text=True, timeout=10)
+        return max(0.0, float(result.stdout.strip())) if result.returncode == 0 else 0.0
+    except (OSError, ValueError, subprocess.SubprocessError):
         return 0.0
 
-def scan_reels_folder() -> Dict[str, int]:
-    """
-    Scans the configured REELS_FOLDER for videos.
-    Inserts newly discovered videos, and updates file attributes for existing ones.
-    Generates thumbnails for locally present files.
-    """
-    folder_path = Path(settings.REELS_FOLDER)
-    if not folder_path.exists():
-        logger.error(f"Reels folder does not exist: {folder_path}")
-        return {"scanned": 0, "added": 0, "updated": 0}
-        
-    scanned_count = 0
-    added_count = 0
-    updated_count = 0
-    
-    # Iterate files in directory recursively
-    for root, _, files in os.walk(folder_path):
-        for file in files:
-            file_path = Path(root) / file
-            ext = file_path.suffix.lower()
-            
-            if ext in VALID_EXTENSIONS:
-                scanned_count += 1
-                try:
-                    # Gather system stats
-                    stat = file_path.stat()
-                    file_size = stat.st_size
-                    created_time = datetime.fromtimestamp(stat.st_mtime).isoformat()
-                    
-                    # Normalize path
-                    normalized_filepath = unicodedata.normalize('NFC', str(file_path.resolve()))
-                    
-                    # Check if already present in DB
-                    existing = models.get_reel_by_filepath(normalized_filepath)
-                    
-                    # Determine local presence / download status
-                    is_dl = is_icloud_file_downloaded(str(file_path))
-                    
-                    # Fetch duration (reuse cached if possible to avoid expensive subprocess spawning)
-                    duration = 0.0
-                    if existing and existing.get("duration_seconds") and existing["duration_seconds"] > 0:
-                        duration = existing["duration_seconds"]
-                    elif is_dl:
-                        duration = get_video_duration(str(file_path))
-                    
-                    # Prep data dictionary
-                    reel_data = {
-                        "filename": file_path.name,
-                        "filepath": normalized_filepath,
-                        "file_extension": ext,
-                        "file_size": file_size,
-                        "duration_seconds": duration,
-                        "created_at": created_time
-                    }
-                    
-                    # Upsert
-                    reel_id = models.upsert_scanned_reel(reel_data)
-                    
-                    if existing:
-                        updated_count += 1
-                    else:
-                        added_count += 1
-                        existing = models.get_reel_by_id(reel_id)
-                        
-                    # Thumbnail — retry missing thumbs; pull from iCloud on demand
-                    if existing and not existing.get("thumbnail_path"):
-                        thumb_path = ensure_thumbnail_for_video(
-                            reel_data["filepath"],
-                            icloud_timeout=20.0 if not is_dl else 45.0,
-                        )
-                        if thumb_path:
-                            models.update_reel(reel_id, {"thumbnail_path": Path(thumb_path).name})
-                            
-                except Exception as e:
-                    logger.error(f"Failed scanning file {file_path}: {e}")
-                    
-    return {
-        "scanned": scanned_count,
-        "added": added_count,
-        "updated": updated_count
-    }
 
-
-def backfill_thumbnails(limit: int = 20, icloud_timeout: float = 45.0) -> Dict[str, int]:
-    """
-    Generate thumbnails for reels missing them.
-    Triggers selective iCloud downloads — does not bulk-download the whole library.
-    """
-    missing = models.get_reels_missing_thumbnails(limit)
-    generated = 0
-    failed = 0
-
-    for reel in missing:
-        try:
-            thumb_path = ensure_thumbnail_for_video(
-                reel["filepath"],
-                icloud_timeout=icloud_timeout,
-            )
-            if thumb_path:
-                models.update_reel(reel["id"], {"thumbnail_path": Path(thumb_path).name})
-                generated += 1
+def scan_reels_folder():
+    folder = Path(settings.REELS_FOLDER).resolve()
+    if not folder.is_dir():
+        raise FileNotFoundError(f"Reels folder is unavailable: {folder}. Check that cloud storage is running.")
+    now = datetime.now(timezone.utc).isoformat()
+    stats = dict(scanned=0, added=0, updated=0, missing=0, skipped=0)
+    entries = []
+    seen = set()
+    errors = []
+    for root, dirs, files in os.walk(folder, onerror=errors.append, followlinks=False):
+        dirs[:] = [d for d in dirs if not (Path(root) / d).is_symlink()]
+        for name in files:
+            path = Path(root) / name
+            stub = name.startswith('.') and name.endswith('.icloud')
+            logical = path.with_name(name[1:-7]) if stub else path
+            if logical.suffix.lower() not in VALID_EXTENSIONS or path.is_symlink():
+                continue
+            filepath = unicodedata.normalize('NFC', str(logical.absolute()))
+            seen.add(filepath)
+            try:
+                stat = path.stat()
+                state = "cloud" if stub else storage_status(str(path))
+                # Ignore files still arriving; record in seen so an existing row isn't marked missing.
+                if not stub and (not stat.st_size or time.time() - stat.st_mtime < settings.FILE_SETTLE_SECONDS):
+                    stats['skipped'] += 1
+                    continue
+                entries.append((filepath, logical, stat, state, stub))
+            except OSError as exc:
+                errors.append(exc)
+    # One transaction prevents readers seeing a partly reconciled catalog.
+    with get_db_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = {r['filepath']: dict(r) for r in conn.execute("SELECT * FROM reels")}
+        for filepath, path, stat, state, stub in entries:
+            old = existing.get(filepath)
+            version = (old or {}).get('source_version') if stub else f"{stat.st_size}:{stat.st_mtime_ns}"
+            changed = bool(old and old['source_version'] and version and old['source_version'] != version)
+            size = (old or {}).get('file_size', 0) if stub else stat.st_size
+            modified = (old or {}).get('created_at', now) if stub else datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+            if old:
+                conn.execute("""UPDATE reels SET file_size=?, created_at=?, storage_status=?,
+                    source_version=?, last_seen_at=? WHERE id=?""",
+                    (size, modified, state, version, now, old['id']))
+                if old.get('thumbnail_path') and not (settings.THUMBNAILS_FOLDER / Path(old['thumbnail_path']).name).is_file():
+                    conn.execute('UPDATE reels SET thumbnail_path=NULL WHERE id=?', (old['id'],))
+                if changed:
+                    conn.execute("""UPDATE reels SET duration_seconds=0, thumbnail_path=NULL,
+                        quick_summary=NULL, quick_tags=NULL, quick_category=NULL, quick_summary_source=NULL,
+                        quick_summary_at=NULL, quick_summary_model=NULL WHERE id=?""", (old['id'],))
+                    conn.execute("DELETE FROM summary_jobs WHERE reel_id=? AND status != 'processing'", (old['id'],))
+                stats['updated'] += 1
             else:
-                failed += 1
-        except Exception as exc:
-            logger.error("Thumbnail backfill failed for %s: %s", reel.get("filepath"), exc)
-            failed += 1
+                conn.execute("""INSERT INTO reels (filename,filepath,file_extension,file_size,duration_seconds,
+                    created_at,updated_at,discovered_at,storage_status,source_version,last_seen_at)
+                    VALUES (?,?,?,?,0,?,?,?,?,?,?)""",
+                    (path.name, filepath, path.suffix.lower(), size, modified, now, now, state, version, now))
+                stats['added'] += 1
+            stats['scanned'] += 1
+        # A disconnected/incomplete tree must never mark an entire archive missing.
+        if not errors:
+            for filepath, old in existing.items():
+                if filepath.startswith(str(folder) + os.sep) and filepath not in seen:
+                    conn.execute("UPDATE reels SET storage_status='missing' WHERE id=?", (old['id'],))
+                    stats['missing'] += 1
+        conn.commit()
+    if errors:
+        raise OSError(f"Scan incomplete ({len(errors)} filesystem errors). Missing-file reconciliation was skipped.")
+    return stats
 
-    return {
-        "processed": len(missing),
-        "generated": generated,
-        "failed": failed,
-        "remaining": models.count_reels_missing_thumbnails(),
-    }
 
+def backfill_thumbnails(limit=20, icloud_timeout=0):
+    # Local files only, regardless of caller. Offloaded media waits for explicit playback.
+    candidates = models.get_reels_missing_thumbnails(10000)
+    local = [r for r in candidates if storage_status(r['filepath']) == 'local'][:limit]
+    generated = 0
+    for reel in local:
+        thumb = generate_thumbnail(reel['filepath'])
+        if thumb:
+            models.update_reel(reel['id'], {'thumbnail_path': Path(thumb).name})
+            generated += 1
+    return dict(processed=len(local), generated=generated, failed=len(local)-generated,
+                remaining=models.count_reels_missing_thumbnails())

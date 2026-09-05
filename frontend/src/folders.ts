@@ -9,9 +9,11 @@ export interface FolderNode {
 
 /** Relative folder path inside the reels root (empty string = file at root). */
 export function getRelativeFolder(filepath: string, reelsRoot: string): string {
-  const normalizedRoot = reelsRoot.replace(/\/+$/, '');
+  const normalizedRoot = reelsRoot.normalize('NFC').replace(/\/+$/, '');
+  filepath = filepath.normalize('NFC');
+  if (normalizedRoot && !filepath.startsWith(normalizedRoot + '/')) return 'Previous source';
   let rel = filepath;
-  if (filepath.startsWith(normalizedRoot)) {
+  if (normalizedRoot && filepath.startsWith(normalizedRoot + '/')) {
     rel = filepath.slice(normalizedRoot.length).replace(/^\/+/, '');
   }
   const lastSlash = rel.lastIndexOf('/');

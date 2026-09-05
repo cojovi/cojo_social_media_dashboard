@@ -1,3 +1,21 @@
+# September 5, 2026 — Lower-frequency archive scans
+
+- Changed the configured and default recursive scan interval to 15 minutes, retaining startup and manual scans.
+- Quick descriptions continue independently of the scan interval. Gemini Batch API remains a future option for nonurgent jobs; the existing frame-based queue already costs only cents per thousand descriptions.
+
+# September 4, 2026 — Archive discovery and economical descriptions
+
+- Reviewed source, CLI, documentation, configuration, live catalog, and source metadata.
+- Fixed startup/periodic discovery and detached scans from media reads.
+- Added durable quick descriptions from small frames/cached thumbnails with Gemini 2.5 Flash-Lite, usage estimates, daily budget, pause/resume and retry.
+- Added missing/offloaded/local status, summary/tag search, background UI refresh, and bounded card rendering.
+- Removed hover/editor preloads and automatic cloud thumbnail hydration.
+- Preserved the database with an automatic migration backup; added WAL and indexes.
+- Fixed save/analysis responses overwriting newer form input; hardened ready validation and kept full AI quality notes.
+- Added tests and ran a successful low-cost live pilot. See README and ARCHIVE_DESIGN for current operations and limitations.
+
+---
+
 # ReelVault Progress Log
 
 ## 2026-06-29 — Post-move recovery & dashboard upgrades

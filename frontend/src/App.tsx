@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { 
   Film, CheckCircle2, AlertCircle, FileText, Send, Archive, 
   Settings as SettingsIcon, Search, RefreshCw, Sparkles, 
@@ -6,7 +6,8 @@ import {
   CheckSquare, Square, ListChecks, Loader2
 } from 'lucide-react';
 import { api } from './api';
-import type { Reel, StatusCounts, HealthStatus } from './api';
+import type { Reel, StatusCounts, HealthStatus, ArchiveStatus } from './api';
+import { ArchivePanel } from './ArchivePanel';
 import { useAnalysisQueue } from './useAnalysisQueue';
 import {
   buildFolderTree,
@@ -26,12 +27,13 @@ export default function App() {
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [editingReel, setEditingReel] = useState<Reel | null>(null);
-  const [hoveredCardId, setHoveredCardId] = useState<number | null>(null);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [quickLookReel, setQuickLookReel] = useState<Reel | null>(null);
-  const [thumbBackfillRunning, setThumbBackfillRunning] = useState(false);
-  const thumbBackfillStartedRef = useRef(false);
+  const [archiveStatus, setArchiveStatus] = useState<ArchiveStatus | null>(null);
+  const [availability, setAvailability] = useState('');
+  const [gridPage, setGridPage] = useState({ key: '', limit: 60 });
+  const [hasQuickSummary, setHasQuickSummary] = useState<boolean | null>(null);
   
   // Filters
   const [searchTerm, setSearchTerm] = useState('');
@@ -64,52 +66,37 @@ export default function App() {
     }, 5000);
   }, []);
 
-  const loadData = async () => {
-    setLoading(true);
+  const requestVersion = useRef(0);
+  const loadData = useCallback(async (background = false) => {
+    const request = ++requestVersion.current;
+    if (!background) setLoading(true);
     try {
-      // Load stats
-      const counts = await api.getStats();
-      setStats(counts);
-
-      // Load health
-      const status = await api.getHealth();
-      setHealth(status);
-
-      // Load reels list matching active tab filter
-      const filterParams: any = {
+      const params: Parameters<typeof api.getReels>[0] = {
         search: searchTerm || undefined,
-        has_final_post: hasFinalPost !== null ? hasFinalPost : undefined,
-        has_ai_summary: hasAiSummary !== null ? hasAiSummary : undefined,
+        has_final_post: hasFinalPost ?? undefined,
+        has_ai_summary: hasAiSummary ?? undefined,
+        has_quick_summary: hasQuickSummary ?? undefined,
+        availability: availability || undefined,
       };
-      
-      if (activeTab !== 'all' && activeTab !== 'settings') {
-        filterParams.status = activeTab;
-      }
-      
-      const list = await api.getReels(filterParams);
-      setReels(list);
-    } catch (error: any) {
-      addToast(error.message || "Failed to load database content.", "error");
+      if (activeTab !== 'all' && activeTab !== 'settings') params.status = activeTab;
+      const [counts, health, list, archive] = await Promise.all([
+        api.getStats(), api.getHealth(), api.getReels(params), api.getArchiveStatus(),
+      ]);
+      if (request !== requestVersion.current) return;
+      setStats(counts); setHealth(health); setReels(list); setArchiveStatus(archive);
+    } catch (error) {
+      if (!background) addToast(error instanceof Error ? error.message : 'Failed to load archive.', 'error');
     } finally {
-      setLoading(false);
+      if (request === requestVersion.current) setLoading(false);
     }
-  };
+  }, [activeTab, searchTerm, hasFinalPost, hasAiSummary, hasQuickSummary, availability, addToast]);
 
   useEffect(() => {
-    if (activeTab !== 'settings') {
-      loadData();
-    } else {
-      api.getHealth().then(setHealth).catch(() => {});
-    }
-  }, [activeTab, searchTerm, hasFinalPost, hasAiSummary]);
-
-  useEffect(() => {
-    if (activeTab !== 'all') {
-      setSelectedFolder(null);
-    }
-    setSelectionMode(false);
-    setSelectedIds(new Set());
-  }, [activeTab]);
+    const initial = setTimeout(() => { void loadData(); }, 200);
+    const poll = setInterval(() => { void loadData(true); }, 10000);
+    const invalidate = () => { requestVersion.current++; };
+    return () => { clearTimeout(initial); clearInterval(poll); invalidate(); };
+  }, [loadData]);
 
   const reelsRoot = health?.reels_folder_path || '';
   const folderTree = useMemo(
@@ -120,6 +107,10 @@ export default function App() {
     () => (activeTab === 'all' && reelsRoot ? filterReelsByFolder(reels, reelsRoot, selectedFolder) : reels),
     [reels, reelsRoot, selectedFolder, activeTab]
   );
+
+  const gridKey = JSON.stringify([activeTab, searchTerm, hasFinalPost, hasAiSummary, hasQuickSummary, availability, selectedFolder]);
+  const visibleLimit = gridPage.key === gridKey ? gridPage.limit : 60;
+  const renderedReels = displayedReels.slice(0, visibleLimit);
 
   const syncFormFromReel = (reel: Reel) => {
     setStatusInput(reel.status);
@@ -132,14 +123,12 @@ export default function App() {
 
   const handleReelUpdatedFromQueue = useCallback((updated: Reel) => {
     setReels(prev => prev.map(r => (r.id === updated.id ? updated : r)));
-    setEditingReel(current => {
-      if (current?.id === updated.id) {
-        saveBaselineRef.current = updated;
-        syncFormFromReel(updated);
-        return updated;
-      }
-      return current;
-    });
+    // Analysis updates never reset an in-progress manual draft.
+    setEditingReel(current => current?.id === updated.id ? {
+      ...current, ai_summary: updated.ai_summary, ai_suggested_post_text: updated.ai_suggested_post_text,
+      ai_suggested_hashtags: updated.ai_suggested_hashtags, ai_category: updated.ai_category,
+      ai_platform_suggestion: updated.ai_platform_suggestion, ai_quality_notes: updated.ai_quality_notes,
+    } : current);
   }, []);
 
   const {
@@ -165,7 +154,7 @@ export default function App() {
   };
 
   const selectAllVisible = () => {
-    setSelectedIds(new Set(displayedReels.map(r => r.id)));
+    setSelectedIds(new Set(renderedReels.map(r => r.id)));
   };
 
   const clearSelection = () => setSelectedIds(new Set());
@@ -202,19 +191,19 @@ export default function App() {
     );
   }, []);
 
+  const formValuesRef = useRef({ status: statusInput as Reel['status'], approved: approvedInput,
+    manual_post_text: manualPostInput, final_post_text: finalPostInput, hashtags: hashtagsInput, notes: notesInput });
+  useLayoutEffect(() => {
+    formValuesRef.current = { status: statusInput as Reel['status'], approved: approvedInput,
+      manual_post_text: manualPostInput, final_post_text: finalPostInput, hashtags: hashtagsInput, notes: notesInput };
+  }, [statusInput, approvedInput, manualPostInput, finalPostInput, hashtagsInput, notesInput]);
+
   const persistReel = useCallback(async (options?: { silent?: boolean; reelId?: number }) => {
     const silent = options?.silent ?? false;
     const reelId = options?.reelId ?? editingReel?.id;
     if (!reelId || savingLockRef.current) return false;
 
-    const payload = {
-      status: statusInput as Reel['status'],
-      approved: approvedInput,
-      manual_post_text: manualPostInput,
-      final_post_text: finalPostInput,
-      hashtags: hashtagsInput,
-      notes: notesInput,
-    };
+    const payload = { ...formValuesRef.current };
 
     if (!formDiffersFromBaseline(saveBaselineRef.current, {
       status: payload.status,
@@ -235,30 +224,25 @@ export default function App() {
       if (editingIdRef.current === reelId) {
         saveBaselineRef.current = updated;
         setEditingReel(updated);
-        syncFormFromReel(updated);
+        if (JSON.stringify(formValuesRef.current) === JSON.stringify(payload)) syncFormFromReel(updated);
       }
       setReels(prev => prev.map(r => (r.id === updated.id ? updated : r)));
       api.getStats().then(setStats).catch(() => {});
       setSaveStatus('saved');
       if (!silent) addToast('Draft saved to database.', 'success');
       return true;
-    } catch (error: any) {
+    } catch (error: unknown) {
       setSaveStatus('error');
-      addToast(error.message || 'Failed to save reel details.', 'error');
+      addToast((error instanceof Error ? error.message : '') || 'Failed to save reel details.', 'error');
       return false;
     } finally {
       savingLockRef.current = false;
       setSaving(false);
     }
   }, [
-    editingReel?.id,
-    statusInput,
-    approvedInput,
-    manualPostInput,
-    finalPostInput,
-    hashtagsInput,
-    notesInput,
+    editingReel,
     formDiffersFromBaseline,
+    addToast,
   ]);
 
   useEffect(() => {
@@ -274,13 +258,12 @@ export default function App() {
     });
 
     if (!dirty) {
-      setSaveStatus('saved');
       return;
     }
 
-    setSaveStatus('pending');
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(() => {
+      setSaveStatus('pending');
       void persistReel({ silent: true });
     }, 600);
 
@@ -288,7 +271,7 @@ export default function App() {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
   }, [
-    editingReel?.id,
+    editingReel,
     statusInput,
     approvedInput,
     manualPostInput,
@@ -313,50 +296,13 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [editingReel, persistReel, quickLookReel]);
 
-  useEffect(() => {
-    if (loading || activeTab === 'settings' || thumbBackfillStartedRef.current) return;
-    const missing = reels.filter(r => !r.thumbnail_path).length;
-    if (missing === 0) return;
-
-    thumbBackfillStartedRef.current = true;
-    let cancelled = false;
-
-    const runBackfill = async () => {
-      setThumbBackfillRunning(true);
-      try {
-        while (!cancelled) {
-          const result = await api.backfillThumbnails(12);
-          if (result.generated > 0) {
-            const filterParams: Parameters<typeof api.getReels>[0] = {
-              search: searchTerm || undefined,
-              has_final_post: hasFinalPost !== null ? hasFinalPost : undefined,
-              has_ai_summary: hasAiSummary !== null ? hasAiSummary : undefined,
-            };
-            if (activeTab !== 'all') {
-              filterParams.status = activeTab;
-            }
-            const list = await api.getReels(filterParams);
-            if (!cancelled) setReels(list);
-          }
-          if (result.remaining <= 0 || result.generated === 0) break;
-          await new Promise(r => setTimeout(r, 400));
-        }
-      } catch {
-        // silent — user can rescan manually
-      } finally {
-        if (!cancelled) setThumbBackfillRunning(false);
-      }
-    };
-
-    void runBackfill();
-    return () => { cancelled = true; };
-  }, [loading, activeTab, reels.length]);
-
   const getCaptionPreview = (reel: Reel) => {
     if (reel.final_post_text?.trim()) return reel.final_post_text;
     if (reel.manual_post_text?.trim()) return reel.manual_post_text;
     if (reel.notes?.trim()) return `[Note] ${reel.notes}`;
-    return 'No draft saved yet. Open workbench to add caption, hashtags, or notes.';
+    if (reel.quick_summary) return reel.quick_summary;
+    if (reel.ai_summary) return reel.ai_summary;
+    return 'Waiting for a quick description. Open workbench to add notes.';
   };
 
   const toggleFolderExpanded = (path: string) => {
@@ -383,12 +329,12 @@ export default function App() {
     try {
       const result = await api.scanFolder();
       addToast(
-        `Directory scan completed! Scanned: ${result.scanned_count}, Added: ${result.added_count}, Updated: ${result.updated_count}`,
+        `Scan complete: ${result.scanned_count} files, ${result.added_count} new, ${result.missing_count} missing/moved, ${result.skipped_count} empty or still arriving.`,
         "success"
       );
       loadData();
-    } catch (error: any) {
-      addToast(error.message || "Failed to scan folder.", "error");
+    } catch (error: unknown) {
+      addToast((error instanceof Error ? error.message : '') || "Failed to scan folder.", "error");
     } finally {
       setScanning(false);
     }
@@ -400,12 +346,13 @@ export default function App() {
       autosaveTimerRef.current = null;
     }
     if (editingReel) {
-      await persistReel({ silent: true, reelId: editingReel.id });
+      if (!await persistReel({ silent: true, reelId: editingReel.id })) return false;
     }
     editingIdRef.current = null;
     saveBaselineRef.current = null;
     setEditingReel(null);
     setSaveStatus('idle');
+    return true;
   };
 
   const handleSelectReel = async (reel: Reel) => {
@@ -413,7 +360,7 @@ export default function App() {
 
     if (editingReel && editingReel.id !== reel.id) {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
-      await persistReel({ silent: true, reelId: editingReel.id });
+      if (!await persistReel({ silent: true, reelId: editingReel.id })) return false;
     }
 
     editingIdRef.current = reel.id;
@@ -427,7 +374,11 @@ export default function App() {
       if (editingIdRef.current !== reel.id) return;
       saveBaselineRef.current = fresh;
       setEditingReel(fresh);
-      syncFormFromReel(fresh);
+      const fields = formValuesRef.current;
+      if (!formDiffersFromBaseline(reel, { status: fields.status, approved: fields.approved,
+        manual: fields.manual_post_text, final: fields.final_post_text, hashtags: fields.hashtags, notes: fields.notes })) {
+        syncFormFromReel(fresh);
+      }
       setReels(prev => prev.map(r => (r.id === fresh.id ? fresh : r)));
     } catch {
       addToast('Could not refresh reel from server.', 'warning');
@@ -444,31 +395,15 @@ export default function App() {
     if (reel) enqueueAnalysis([reel]);
   };
 
-  const handleUseAiCaption = async () => {
-    if (!editingReel) return;
-    try {
-      const updated = await api.useAiCaption(editingReel.id);
-      setEditingReel(updated);
-      setFinalPostInput(updated.final_post_text || '');
-      addToast("Copied Gemini suggestion into final post caption.", "success");
-    } catch (error: any) {
-      addToast(error.message, "error");
-    }
+  const handleUseAiCaption = () => {
+    if (editingReel?.ai_suggested_post_text) setFinalPostInput(editingReel.ai_suggested_post_text);
   };
-
-  const handleUseAiHashtags = async () => {
-    if (!editingReel) return;
-    try {
-      const updated = await api.useAiHashtags(editingReel.id);
-      setEditingReel(updated);
-      setHashtagsInput(updated.hashtags || '');
-      addToast("Copied Gemini suggested tags to active list.", "success");
-    } catch (error: any) {
-      addToast(error.message, "error");
-    }
+  const handleUseAiHashtags = () => {
+    if (editingReel?.ai_suggested_hashtags) setHashtagsInput(editingReel.ai_suggested_hashtags);
   };
 
   const handleMarkReady = async (id: number) => {
+    if (editingReel?.id === id && !await persistReel({ silent: true })) return;
     try {
       const updated = await api.markReady(id);
       addToast("Reel approved and pushed to the Ready Queue!", "success");
@@ -478,12 +413,13 @@ export default function App() {
         setApprovedInput(updated.approved);
       }
       loadData();
-    } catch (error: any) {
-      addToast(error.message || "Ready verification failed. A final caption is required.", "error");
+    } catch (error: unknown) {
+      addToast((error instanceof Error ? error.message : '') || "Ready verification failed. A final caption is required.", "error");
     }
   };
 
   const handleMarkPosted = async (id: number) => {
+    if (editingReel?.id === id && !await persistReel({ silent: true })) return;
     try {
       const updated = await api.markPosted(id);
       addToast("Reel marked as posted on social media.", "success");
@@ -492,12 +428,13 @@ export default function App() {
         setStatusInput(updated.status);
       }
       loadData();
-    } catch (error: any) {
-      addToast(error.message, "error");
+    } catch (error: unknown) {
+      addToast(error instanceof Error ? error.message : 'Action failed.', "error");
     }
   };
 
   const handleArchive = async (id: number) => {
+    if (editingReel?.id === id && !await persistReel({ silent: true })) return;
     if (!window.confirm("Are you sure you want to archive this reel?")) return;
     try {
       const updated = await api.archiveReel(id);
@@ -507,8 +444,8 @@ export default function App() {
         setStatusInput(updated.status);
       }
       loadData();
-    } catch (error: any) {
-      addToast(error.message, "error");
+    } catch (error: unknown) {
+      addToast(error instanceof Error ? error.message : 'Action failed.', "error");
     }
   };
 
@@ -623,7 +560,7 @@ export default function App() {
             return (
               <button
                 key={tab.id}
-                onClick={async () => { await handleCloseWorkbench(); setActiveTab(tab.id as any); }}
+                onClick={async () => { if (!await handleCloseWorkbench()) return; setSelectedFolder(null); setSelectionMode(false); clearSelection(); setActiveTab(tab.id as typeof activeTab); }}
                 className={`w-full flex items-center justify-between px-4 py-3 rounded-lg border transition-all duration-200 cursor-pointer ${
                   isActive 
                     ? tab.highlight 
@@ -651,7 +588,7 @@ export default function App() {
         {/* System Health Summary & Settings link */}
         <div className="p-4 border-t border-plum-800 bg-plum-950/50 flex flex-col gap-3">
           <button 
-            onClick={async () => { await handleCloseWorkbench(); setActiveTab('settings'); }}
+            onClick={async () => { if (await handleCloseWorkbench()) setActiveTab('settings'); }}
             className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg border text-sm transition-all duration-200 cursor-pointer ${
               activeTab === 'settings' 
                 ? 'bg-plum-900 border-neon-pink/80 text-neon-pink shadow-[0_0_10px_rgba(255,0,127,0.3)]'
@@ -667,7 +604,7 @@ export default function App() {
               <span className={`w-2.5 h-2.5 rounded-full ${health?.gemini_configured ? 'bg-green-500 shadow-[0_0_6px_#22c55e]' : 'bg-red-500'}`} />
               AI: {health?.gemini_configured ? 'GEMINI ON' : 'OFFLINE'}
             </span>
-            <span className="opacity-80">v1.0.0</span>
+            <span className="opacity-80">v1.1.0</span>
           </div>
         </div>
       </aside>
@@ -714,11 +651,11 @@ export default function App() {
               <button 
                 type="button"
                 onClick={handleScan}
-                disabled={scanning || thumbBackfillRunning}
+                disabled={scanning || archiveStatus?.scan.running}
                 className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-neon-pink to-neon-orange text-white rounded-lg text-sm font-semibold border border-neon-pink hover:opacity-90 active:scale-95 shadow-[0_0_10px_rgba(255,0,127,0.4)] disabled:opacity-50 transition-all cursor-pointer"
               >
-                <RefreshCw className={`w-4 h-4 ${scanning || thumbBackfillRunning ? 'animate-spin' : ''}`} />
-                <span>{thumbBackfillRunning ? 'Building Thumbs…' : 'Rescan Folder'}</span>
+                <RefreshCw className={`w-4 h-4 ${scanning || archiveStatus?.scan.running ? 'animate-spin' : ''}`} />
+                <span>{scanning || archiveStatus?.scan.running ? 'Scanning…' : 'Rescan Folder'}</span>
               </button>
             )}
           </div>
@@ -729,6 +666,7 @@ export default function App() {
           {activeTab === 'settings' ? (
             /* Settings View Page */
             <div className="w-full max-w-3xl flex flex-col gap-6 overflow-y-auto pr-2">
+              <ArchivePanel status={archiveStatus} onRefresh={() => void loadData(true)} onToast={addToast} onScan={() => void handleScan()} />
               <div className="glass-panel rounded-xl border border-plum-800 p-6 flex flex-col gap-6 shadow-xl">
                 <div className="flex items-center gap-3 border-b border-plum-800 pb-4">
                   <SettingsIcon className="w-6 h-6 text-neon-pink" />
@@ -772,8 +710,8 @@ export default function App() {
                     <div className="p-4 bg-green-950/30 border border-green-800/50 rounded-lg flex items-start gap-3">
                       <Sparkles className="w-5 h-5 text-green-400 shrink-0 mt-0.5 animate-pulse" />
                       <div>
-                        <p className="text-green-400 text-sm font-semibold">Gemini Service is ACTIVE</p>
-                        <p className="text-xs text-green-300/80 mt-0.5">Your API key is active. Click "Analyze" on any reel detail card to have the AI write suggestions and summarize events.</p>
+                        <p className="text-green-400 text-sm font-semibold">Gemini key configured</p>
+                        <p className="text-xs text-green-300/80 mt-0.5">An API key is configured. Click "Analyze" on any reel detail card to have the AI write suggestions and summarize events.</p>
                       </div>
                     </div>
                   ) : (
@@ -793,13 +731,21 @@ export default function App() {
             <div className="flex-1 flex gap-8 min-w-0 items-stretch h-full overflow-hidden">
               {/* Reels List Explorer */}
               <div className="flex-1 flex flex-col gap-6 min-w-0 h-full overflow-hidden">
+                <div className="text-xs text-purple-300 flex flex-wrap items-center gap-3" role="status">
+                  <span>{archiveStatus?.scan.running ? 'Scanning for new reels…' : archiveStatus?.scan.finished_at ? `Last scan ${new Date(archiveStatus.scan.finished_at).toLocaleTimeString()}` : 'Connecting to archive…'}</span>
+                  <span>· {archiveStatus?.described || 0} described</span>
+                  <button className="text-neon-cyan underline cursor-pointer" onClick={async () => { if (await handleCloseWorkbench()) setActiveTab('settings'); }}>
+                    {archiveStatus?.paused ? 'Descriptions paused' : `${archiveStatus?.jobs.queued || 0} descriptions queued`} · Manage
+                  </button>
+                  {archiveStatus?.scan.error && <span className="text-amber-300">Scan needs attention — see Settings</span>}
+                </div>
                 {/* Filters Row */}
                 <div className="glass-panel p-4 rounded-xl border border-plum-800 flex flex-wrap gap-4 items-center justify-between shadow-md">
                   <div className="relative flex-1 min-w-[240px]">
                     <Search className="w-4 h-4 text-purple-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input 
                       type="text"
-                      placeholder="Search by filename, caption, hashtag, or notes..."
+                      placeholder="Search descriptions, subjects, tags, captions, notes..."
                       value={searchTerm}
                       onChange={e => setSearchTerm(e.target.value)}
                       className="w-full bg-plum-950 border border-plum-800 rounded-lg pl-10 pr-4 py-2 text-sm text-white focus:outline-none focus:border-neon-cyan/80 transition-all font-sans"
@@ -807,6 +753,12 @@ export default function App() {
                   </div>
                   
                   <div className="flex items-center gap-4 flex-wrap">
+                    <select aria-label="File availability" value={availability} onChange={e => setAvailability(e.target.value)} className="bg-plum-950 border border-plum-800 text-xs text-purple-200 rounded-lg p-2">
+                      <option value="">Any storage</option><option value="local">On this Mac</option><option value="cloud">Offloaded</option><option value="missing">Missing / moved</option>
+                    </select>
+                    <select aria-label="Quick description" value={hasQuickSummary === null ? '' : String(hasQuickSummary)} onChange={e => setHasQuickSummary(e.target.value === '' ? null : e.target.value === 'true')} className="bg-plum-950 border border-plum-800 text-xs text-purple-200 rounded-lg p-2">
+                      <option value="">Any description</option><option value="true">Quick description saved</option><option value="false">No quick description</option>
+                    </select>
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-purple-400 uppercase font-bold">Caption:</span>
                       <select 
@@ -821,15 +773,15 @@ export default function App() {
                     </div>
 
                     <div className="flex items-center gap-2">
-                      <span className="text-xs text-purple-400 uppercase font-bold">AI Status:</span>
+                      <span className="text-xs text-purple-400 uppercase font-bold">Full review:</span>
                       <select 
                         value={hasAiSummary === null ? 'all' : String(hasAiSummary)}
                         onChange={e => setHasAiSummary(e.target.value === 'all' ? null : e.target.value === 'true')}
                         className="bg-plum-950 border border-plum-800 text-xs text-purple-200 rounded-lg p-2 focus:outline-none"
                       >
                         <option value="all">All Reels</option>
-                        <option value="true">Analyzed Only</option>
-                        <option value="false">Not Analyzed</option>
+                        <option value="true">Reviewed Only</option>
+                        <option value="false">Not Reviewed</option>
                       </select>
                     </div>
                   </div>
@@ -894,7 +846,7 @@ export default function App() {
                     </div>
                   ) : (
                     <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-6 pb-6">
-                      {displayedReels.map(reel => {
+                      {renderedReels.map(reel => {
                         const hasFinalCaption = reel.final_post_text && reel.final_post_text.trim();
                         const hasManualDraft = reel.manual_post_text && reel.manual_post_text.trim();
                         const hasNotes = reel.notes && reel.notes.trim();
@@ -911,9 +863,7 @@ export default function App() {
                               }
                               void handleSelectReel(reel);
                             }}
-                            onMouseEnter={() => !selectionMode && setHoveredCardId(reel.id)}
-                            onMouseLeave={() => setHoveredCardId(null)}
-                            className={`glass-panel rounded-xl border cursor-pointer overflow-hidden transition-all duration-300 flex flex-col h-[500px] group shadow-md hover:-translate-y-1.5 ${
+                            className={`glass-panel rounded-xl border cursor-pointer overflow-hidden transition-all duration-300 flex flex-col min-h-[530px] group shadow-md hover:-translate-y-1.5 ${
                               isEditing 
                                 ? 'border-neon-cyan animate-pulse-cyan' 
                                 : selectedIds.has(reel.id)
@@ -951,22 +901,13 @@ export default function App() {
                               {reel.thumbnail_path && (
                                 <div 
                                   className="absolute inset-0 bg-cover bg-center blur-xl opacity-35 scale-110"
-                                  style={{ backgroundImage: `url(/thumbnails/${reel.thumbnail_path})` }}
+                                  style={{ backgroundImage: `url(/thumbnails/${encodeURIComponent(reel.thumbnail_path)})` }}
                                 />
                               )}
                               
-                              {hoveredCardId === reel.id ? (
-                                <video 
-                                  src={`/api/reels/${reel.id}/video`}
-                                  muted
-                                  autoPlay
-                                  loop
-                                  playsInline
-                                  className="h-full aspect-[9/16] object-contain relative z-10 shadow-lg"
-                                />
-                              ) : reel.thumbnail_path ? (
-                                <img 
-                                  src={`/thumbnails/${reel.thumbnail_path}`} 
+                              {reel.thumbnail_path ? (
+                                <img loading="lazy" decoding="async"
+                                  src={`/thumbnails/${encodeURIComponent(reel.thumbnail_path)}`}
                                   alt={reel.filename} 
                                   className="h-full aspect-[9/16] object-contain relative z-10 group-hover:scale-102 transition-all duration-500 shadow-lg"
                                 />
@@ -977,6 +918,9 @@ export default function App() {
                                 </div>
                               )}
 
+                              <span className="absolute bottom-2 left-2 z-20 px-2 py-1 rounded bg-black/80 text-[10px] text-purple-100">
+                                {reel.storage_status === 'cloud' ? 'Offloaded' : reel.storage_status === 'missing' ? 'Missing / moved' : reel.storage_status === 'local' ? 'On this Mac' : 'Checking storage'}
+                              </span>
                               {/* Duration Badge */}
                               <span className="absolute bottom-2 right-2 px-2 py-0.5 rounded bg-black/80 backdrop-blur-md text-[10px] font-mono font-bold text-white tracking-wider border border-white/10">
                                 {Math.floor(reel.duration_seconds / 60)}:
@@ -1058,7 +1002,7 @@ export default function App() {
                                         onClick={(e) => { e.stopPropagation(); handleAnalyze(reel.id); }}
                                         disabled={getReelQueueStatus(reel.id) === 'queued' || getReelQueueStatus(reel.id) === 'processing'}
                                         className="p-1.5 rounded-lg bg-plum-950 border border-plum-800 text-neon-pink hover:text-white hover:bg-neon-pink/20 hover:border-neon-pink/50 transition-all cursor-pointer disabled:opacity-40"
-                                        title="Queue Gemini AI Analysis"
+                                        title="Queue full video review + captions"
                                       >
                                         <Sparkles className={`w-3.5 h-3.5 ${analyzingId === reel.id ? 'animate-spin' : ''}`} />
                                       </button>
@@ -1086,6 +1030,11 @@ export default function App() {
                         );
                       })}
                     </div>
+                  )}
+                  {!loading && renderedReels.length < displayedReels.length && (
+                    <button className="archive-button mb-6 w-full justify-center" onClick={() => setGridPage({ key: gridKey, limit: visibleLimit + 60 })}>
+                      Show 60 more · {renderedReels.length} of {displayedReels.length}
+                    </button>
                   )}
                   </div>
                 </div>
@@ -1128,7 +1077,7 @@ export default function App() {
                       {editingReel.thumbnail_path && (
                         <div 
                           className="absolute inset-0 bg-cover bg-center blur-2xl opacity-25 scale-110"
-                          style={{ backgroundImage: `url(/thumbnails/${editingReel.thumbnail_path})` }}
+                          style={{ backgroundImage: `url(/thumbnails/${encodeURIComponent(editingReel.thumbnail_path)})` }}
                         />
                       )}
                       <video 
@@ -1136,7 +1085,8 @@ export default function App() {
                         src={`/api/reels/${editingReel.id}/video`}
                         controls 
                         className="h-full aspect-[9/16] object-contain relative z-10 shadow-2xl"
-                        preload="metadata"
+                        preload="none"
+                        poster={editingReel.thumbnail_path ? `/thumbnails/${encodeURIComponent(editingReel.thumbnail_path)}` : undefined}
                       />
                     </div>
 
@@ -1150,6 +1100,15 @@ export default function App() {
                       </div>
                     </div>
 
+                    {(editingReel.quick_summary || reels.find(r => r.id === editingReel.id)?.quick_summary) && (() => {
+                      const described = reels.find(r => r.id === editingReel.id) || editingReel;
+                      return <div className="p-4 rounded-lg border border-neon-cyan/30 bg-plum-950 flex flex-col gap-2">
+                        <h4 className="text-xs text-neon-cyan font-bold uppercase">Quick archive description</h4>
+                        <p className="text-sm text-purple-100 select-text">{described.quick_summary}</p>
+                        <p className="text-xs text-purple-300">{described.quick_category} · {described.quick_tags}</p>
+                        <p className="text-[11px] text-purple-400">{described.quick_summary_source === 'cached_thumbnail' ? 'Based on one cached thumbnail' : 'Based on a few sampled frames'} · No audio review</p>
+                      </div>;
+                    })()}
                     {/* Editor Form fields */}
                     <div className="flex flex-col gap-4">
                       {/* Status and Approved Checkbox */}
@@ -1274,7 +1233,7 @@ export default function App() {
                             className="w-full py-3 bg-gradient-to-r from-neon-pink to-neon-purple hover:opacity-95 text-white rounded-lg text-xs font-retro font-bold border border-neon-pink shadow-[0_0_12px_rgba(255,0,127,0.35)] flex items-center justify-center gap-2 tracking-widest cursor-pointer disabled:opacity-50"
                           >
                             <Sparkles className={`w-4 h-4 ${analyzingId === editingReel.id ? 'animate-spin' : ''}`} />
-                            <span>{getReelQueueStatus(editingReel.id) === 'queued' ? 'QUEUED FOR ANALYSIS' : 'ANALYZE WITH GEMINI AI'}</span>
+                            <span>{getReelQueueStatus(editingReel.id) === 'queued' ? 'QUEUED FOR ANALYSIS' : 'FULL VIDEO REVIEW + CAPTION'}</span>
                           </button>
                         )
                       )}
@@ -1361,7 +1320,7 @@ export default function App() {
             onClick={selectAllVisible}
             className="text-xs text-purple-300 hover:text-white underline cursor-pointer"
           >
-            Select all visible ({displayedReels.length})
+            Select all visible ({renderedReels.length})
           </button>
           <button
             type="button"
@@ -1377,8 +1336,15 @@ export default function App() {
             className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-neon-pink to-neon-purple text-white rounded-lg text-xs font-bold uppercase border border-neon-pink hover:opacity-90 disabled:opacity-40 cursor-pointer"
           >
             <Sparkles className="w-4 h-4" />
-            Generate AI Analysis
+            Full video review + captions
           </button>
+          <button type="button" disabled={selectedIds.size === 0} className="archive-button" onClick={async () => {
+            try {
+              const result = await api.describeMissing([...selectedIds], true);
+              addToast(`${result.queued} quick descriptions queued.`, 'success');
+              clearSelection(); setSelectionMode(false); void loadData(true);
+            } catch (error) { addToast(error instanceof Error ? error.message : 'Could not queue descriptions.', 'error'); }
+          }}>Quick descriptions</button>
         </div>
       )}
 
@@ -1388,7 +1354,7 @@ export default function App() {
           <div className="px-4 py-3 border-b border-plum-800 flex items-center justify-between bg-plum-950/80">
             <div className="flex items-center gap-2">
               <Sparkles className={`w-4 h-4 text-neon-pink ${analysisProcessing ? 'animate-pulse' : ''}`} />
-              <span className="text-xs font-bold uppercase text-white tracking-wider">AI Analysis Queue</span>
+              <span className="text-xs font-bold uppercase text-white tracking-wider">Full Video Review Queue</span>
             </div>
             <button
               type="button"
@@ -1415,7 +1381,7 @@ export default function App() {
           </div>
           {analysisProcessing && (
             <div className="px-4 py-2 border-t border-plum-800 text-[10px] text-purple-400">
-              Processing one reel at a time · {queuedCount} waiting
+              Keep this tab open for full reviews · {queuedCount} waiting
             </div>
           )}
         </div>

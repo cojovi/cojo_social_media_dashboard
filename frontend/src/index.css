@@ -1,7 +1,7 @@
-@import "tailwindcss";
 
 /* Import Premium Fonts from Google Fonts */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Orbitron:wght@500;700;900&family=Press+Start+2P&display=swap');
+@import "tailwindcss";
 
 @theme {
   --color-plum-950: #08040d;
@@ -132,3 +132,12 @@ html, body {
   text-align: left !important;
   display: block !important;
 }
+
+.archive-button {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  border: 1px solid var(--color-plum-600); border-radius: 0.5rem;
+  padding: 0.6rem 0.8rem; color: #e9d5ff; background: var(--color-plum-950);
+  font-size: 0.75rem; cursor: pointer;
+}
+.archive-button:hover { border-color: var(--color-neon-cyan); }
+.archive-button:disabled { opacity: 0.5; cursor: default; }

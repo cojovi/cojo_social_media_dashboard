@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -6,7 +7,8 @@ from pathlib import Path
 
 from .settings import settings
 from .database import init_db
-from .routes import health, reels, queue
+from .routes import health, reels, queue, archive
+from .archive import ArchiveWorker
 
 # Configure logging
 logging.basicConfig(
@@ -20,36 +22,33 @@ logger.info("Initializing SQLite database tables...")
 init_db()
 
 # Ensure directories exist
-Path(settings.REELS_FOLDER).mkdir(parents=True, exist_ok=True)
 Path(settings.THUMBNAILS_FOLDER).mkdir(parents=True, exist_ok=True)
 
+@asynccontextmanager
+async def lifespan(app):
+    worker = ArchiveWorker()
+    worker.start()
+    try:
+        yield
+    finally:
+        worker.stop()
+
 app = FastAPI(
+    lifespan=lifespan,
     title="ReelVault API",
     description="Local-first video archive, caption assistant, and approved social queue manager.",
-    version="1.0.0"
+    version="1.1.0"
 )
 
 # CORS Configuration
 # Standard local development config allowing Vite access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For absolute local convenience. Restrict if needed.
+    allow_origins=[f"http://127.0.0.1:{settings.FRONTEND_PORT}", f"http://localhost:{settings.FRONTEND_PORT}"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Mount video serving static route
-# This allows standard HTML5 <video> streaming directly from local disk securely
-try:
-    app.mount(
-        "/videos",
-        StaticFiles(directory=str(Path(settings.REELS_FOLDER).resolve())),
-        name="videos"
-    )
-    logger.info(f"Mounted Reels folder static serving at /videos from: {settings.REELS_FOLDER}")
-except Exception as e:
-    logger.error(f"Failed to mount static Reels folder: {e}")
 
 # Mount thumbnail serving static route
 try:
@@ -66,6 +65,7 @@ except Exception as e:
 app.include_router(health.router, prefix="/api")
 app.include_router(reels.router, prefix="/api")
 app.include_router(queue.router, prefix="/api")
+app.include_router(archive.router, prefix="/api")
 
 @app.get("/")
 def index():

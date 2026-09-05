@@ -37,7 +37,8 @@ class Settings:
     PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
     
     def __init__(self):
-        reels_val = clean_path_string(os.getenv("REELS_FOLDER", "./reels"))
+        icloud_root = Path.home() / "Library/Mobile Documents/com~apple~CloudDocs/SnapIGTik Download"
+        reels_val = clean_path_string(os.getenv("REELS_FOLDER", str(icloud_root) if icloud_root.is_dir() else "./reels"))
         db_val = clean_path_string(os.getenv("DATABASE_PATH", "./data/reelvault.db"))
         thumbs_val = clean_path_string(os.getenv("THUMBNAILS_FOLDER", "./data/thumbnails"))
         
@@ -48,6 +49,13 @@ class Settings:
         
         self.GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
         self.GEMINI_MODEL = normalize_gemini_model(os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
+        self.QUICK_SUMMARY_MODEL = os.getenv("QUICK_SUMMARY_MODEL", "gemini-2.5-flash-lite").strip()
+        self.AUTO_SCAN = os.getenv("AUTO_SCAN", "true").lower() == "true"
+        self.SCAN_INTERVAL_SECONDS = max(30, int(os.getenv("SCAN_INTERVAL_SECONDS", "900")))
+        self.AUTO_QUICK_SUMMARY = os.getenv("AUTO_QUICK_SUMMARY", "true").lower() == "true"
+        self.FILE_SETTLE_SECONDS = max(0, int(os.getenv("FILE_SETTLE_SECONDS", "60")))
+        self.QUICK_SUMMARY_DELAY_SECONDS = max(1, float(os.getenv("QUICK_SUMMARY_DELAY_SECONDS", "4")))
+        self.QUICK_SUMMARY_DAILY_BUDGET_USD = max(0, float(os.getenv("QUICK_SUMMARY_DAILY_BUDGET_USD", "1")))
         
         self.APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
         self.APP_PORT = int(os.getenv("APP_PORT", "8000"))
@@ -58,5 +66,3 @@ class Settings:
         return bool(self.GEMINI_API_KEY.strip())
 
 settings = Settings()
-
-

@@ -16,6 +16,9 @@ test_thumbnails_folder.mkdir(parents=True, exist_ok=True)
 os.environ["DATABASE_PATH"] = str(test_db_path)
 os.environ["REELS_FOLDER"] = str(test_reels_folder)
 os.environ["THUMBNAILS_FOLDER"] = str(test_thumbnails_folder)
+os.environ["AUTO_SCAN"] = "false"
+os.environ["AUTO_QUICK_SUMMARY"] = "false"
+os.environ["FILE_SETTLE_SECONDS"] = "0"
 os.environ["GEMINI_API_KEY"] = ""  # Force empty API key to test offline mode
 
 from app.database import init_db
@@ -38,5 +41,8 @@ def clean_db():
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM reels")
+        cursor.execute("DELETE FROM summary_jobs")
+        cursor.execute("DELETE FROM archive_state")
+        cursor.execute("DELETE FROM ai_usage")
         conn.commit()
     yield

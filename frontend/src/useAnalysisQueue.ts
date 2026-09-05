@@ -109,7 +109,8 @@ export function useAnalysisQueue({
         return 0;
       }
 
-      syncQueue([...queueRef.current, ...newItems]);
+      const newIds = new Set(newItems.map(item => item.id));
+      syncQueue([...queueRef.current.filter(item => !newIds.has(item.id)), ...newItems]);
       onToast(`Queued ${newItems.length} reel(s) for Gemini analysis.`, 'success');
       void runWorker();
       return newItems.length;

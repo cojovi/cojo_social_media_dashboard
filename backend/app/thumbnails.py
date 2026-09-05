@@ -2,6 +2,7 @@ import hashlib
 import logging
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -20,7 +21,9 @@ def is_qlmanage_available() -> bool:
 
 
 def _thumb_filename(video_path: str) -> str:
-    path_hash = hashlib.md5(video_path.encode("utf-8")).hexdigest()[:8]
+    info = Path(video_path).stat()
+    identity = f"{video_path}:{info.st_size}:{info.st_mtime_ns}"
+    path_hash = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
     return f"{Path(video_path).stem}_{path_hash}.jpg"
 
 
@@ -32,8 +35,7 @@ def generate_thumbnail_qlmanage(video_path: str, output_path: Path) -> bool:
         return False
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_dir = output_path.parent / ".ql_tmp"
-    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix=".ql_", dir=output_path.parent))
 
     try:
         cmd = [
@@ -148,5 +150,6 @@ def ensure_thumbnail_for_video(
     """
     Trigger iCloud download if needed, then generate a cached thumbnail.
     """
-    ensure_icloud_downloaded(video_path, timeout=icloud_timeout)
+    if not ensure_icloud_downloaded(video_path, timeout=icloud_timeout):
+        return None
     return generate_thumbnail(video_path)

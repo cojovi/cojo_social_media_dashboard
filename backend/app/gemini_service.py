@@ -31,25 +31,19 @@ def parse_ai_json(text: str) -> Dict[str, Any]:
         lines = cleaned.splitlines()
         if lines[0].startswith("```"):
             lines = lines[1:]
-        if lines[-1].strip() == "```":
+        if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         cleaned = "\n".join(lines).strip()
     
     try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Gemini output as JSON: {text}. Error: {e}")
-        # Build graceful fallback dictionary
-        return {
-            "summary": text,
-            "suggested_post": "Failed to parse AI JSON caption. See summary.",
-            "hashtags": [],
-            "category": "Uncategorized",
-            "platform_suggestion": "Instagram",
-            "quality_notes": "AI generated a non-structured response."
-        }
+        value = json.loads(cleaned)
+        if not isinstance(value, dict) or not isinstance(value.get("summary"), str) or not value["summary"].strip():
+            raise ValueError("Missing summary")
+        return value
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise GeminiServiceError("Gemini returned an invalid analysis. Existing captions were preserved.") from exc
 
-def analyze_video_with_gemini(video_path: str) -> Dict[str, Any]:
+def analyze_video_with_gemini(video_path: str, reel_id: int | None = None) -> Dict[str, Any]:
     """
     Uploads a local video file to Gemini Files API, waits for processing,
     then requests an analysis utilizing the specified model and settings.
@@ -65,7 +59,7 @@ def analyze_video_with_gemini(video_path: str) -> Dict[str, Any]:
         raise GeminiServiceError(f"Video file does not exist locally: {video_path}")
         
     logger.info(f"Initializing Gemini client for {v_path.name}...")
-    client = genai.Client(api_key=settings.GEMINI_API_KEY)
+    client = genai.Client(api_key=settings.GEMINI_API_KEY, http_options=types.HttpOptions(timeout=120000))
     
     uploaded_file = None
     try:
@@ -100,7 +94,7 @@ def analyze_video_with_gemini(video_path: str) -> Dict[str, Any]:
            - Avoid cringe corporate speak or typical cheesy influencer garbage (e.g. "Calling all...", "Look no further!", "Are you ready?").
            - Keep it practical, structured, and ready to post.
            - Frame the copywriting style to suit a roofing/construction/home-services company, unless the video focuses heavily on a different, obvious topic.
-        4. Generate a separate array of highly relevant, trending hashtags (e.g. ["#roofing", "#homerenovation"]).
+        4. Generate a separate array of highly relevant hashtags (do not claim current trend knowledge) (e.g. ["#roofing", "#homerenovation"]).
         5. Categorize the content (e.g., Showcase, Behind-the-Scenes, Customer Testimonial, Educational, Interactive).
         6. Suggest the best platform fit (Instagram, TikTok, YouTube Shorts, LinkedIn, Facebook).
         7. Evaluate visual quality/suitability and provide brief quality/human-review notes.
@@ -123,12 +117,16 @@ def analyze_video_with_gemini(video_path: str) -> Dict[str, Any]:
             model=settings.GEMINI_MODEL,
             contents=[uploaded_file, prompt],
             config=types.GenerateContentConfig(
-                response_mime_type="application/json"
+                response_mime_type="application/json",
+                max_output_tokens=2000,
+                **({"thinking_config": types.ThinkingConfig(thinking_budget=0)} if settings.GEMINI_MODEL.startswith("gemini-2.5-flash") else {})
             )
         )
         
         logger.info("Received analysis from Gemini. Parsing...")
-        result = parse_ai_json(response.text)
+        from .usage import record_usage
+        record_usage(reel_id, "full", settings.GEMINI_MODEL, response.usage_metadata)
+        result = parse_ai_json(response.text or "")
         return result
         
     except APIError as e:
@@ -147,3 +145,5 @@ def analyze_video_with_gemini(video_path: str) -> Dict[str, Any]:
                 logger.info("Cleanup completed successfully.")
             except Exception as e:
                 logger.warning(f"Failed to delete temporary video file {uploaded_file.name}: {e}")
+
+        client.close()
