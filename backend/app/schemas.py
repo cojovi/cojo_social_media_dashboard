@@ -30,6 +30,10 @@ class ReelResponse(BaseModel):
     storage_status: str = 'unknown'
     last_seen_at: Optional[str] = None
     source_version: Optional[str] = None
+    storage_provider: str = 'local'
+    provider_id: Optional[str] = None
+    provider_path: Optional[str] = None
+    content_hash: Optional[str] = None
     quick_summary: Optional[str] = None
     quick_tags: Optional[str] = None
     quick_category: Optional[str] = None
@@ -39,6 +43,22 @@ class ReelResponse(BaseModel):
     ai_quality_notes: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+class LibraryItemResponse(BaseModel):
+    """Lightweight, unfiltered folder/copy index; never carries editorial bodies."""
+    id: int
+    filename: str
+    filepath: str
+    file_size: int
+    storage_provider: str
+    content_hash: Optional[str] = None
+    status: str
+    storage_status: str = 'unknown'
+
+
+class ReadyQueueResponse(BaseModel):
+    items: List[ReelResponse]
+    next_cursor: Optional[int] = None
 
 class ReelUpdate(BaseModel):
     status: Optional[str] = None
@@ -80,6 +100,7 @@ class ScanResponse(BaseModel):
     updated_count: int
     missing_count: int = 0
     skipped_count: int = 0
+    moved_count: int = 0
 
 class ThumbnailBackfillResponse(BaseModel):
     processed: int

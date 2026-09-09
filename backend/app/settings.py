@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 from dotenv import load_dotenv
 
 # Load env variables from root folder
@@ -60,6 +61,44 @@ class Settings:
         self.APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
         self.APP_PORT = int(os.getenv("APP_PORT", "8000"))
         self.FRONTEND_PORT = int(os.getenv("FRONTEND_PORT", "5173"))
+        self.STORAGE_PROVIDER = os.getenv("STORAGE_PROVIDER", "local")
+        if self.STORAGE_PROVIDER not in {"local", "dropbox"}:
+            raise ValueError("STORAGE_PROVIDER must be local or dropbox")
+        self.CACHE_FOLDER = Path(os.getenv("CACHE_FOLDER", str(self.DATABASE_PATH.parent / "cache"))).resolve()
+        self.CACHE_MAX_BYTES = int(os.getenv("CACHE_MAX_BYTES", "5000000000"))
+        self.CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "43200"))
+        self.PREVIEWS_FOLDER = self.DATABASE_PATH.parent / "previews"
+        self.PREVIEW_MAX_BYTES = max(5_000_000, int(os.getenv("PREVIEW_MAX_BYTES", "1000000000")))
+        self.AUTO_PREVIEWS = os.getenv("AUTO_PREVIEWS", "true").lower() == "true"
+        self.PREVIEW_DELAY_SECONDS = max(1, float(os.getenv("PREVIEW_DELAY_SECONDS", "10")))
+        self.MIN_FREE_DISK_BYTES = int(os.getenv("MIN_FREE_DISK_BYTES", "5000000000"))
+        self.MAX_CONCURRENT_DOWNLOADS = max(1, min(5, int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "5"))))
+        self.AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "false").lower() == "true"
+        self.ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+        self.AGENT_TOKEN = os.getenv("AGENT_TOKEN", "")
+        self.COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"
+        self.PUBLIC_ORIGIN = os.getenv("PUBLIC_ORIGIN", "http://127.0.0.1:18765").rstrip("/")
+        self.FRONTEND_DIST = Path(os.getenv("FRONTEND_DIST", str(self.PROJECT_ROOT / "frontend/dist")))
+        self.DROPBOX_CREDENTIALS_PATH = self.DATABASE_PATH.parent / "secrets/dropbox.json"
+        self.VM_JOBS_ENABLED = os.getenv("VM_JOBS_ENABLED", "true").lower() == "true"
+        if self.AUTH_REQUIRED and (len(self.ADMIN_TOKEN) < 32 or len(self.AGENT_TOKEN) < 32
+                                   or self.ADMIN_TOKEN == self.AGENT_TOKEN):
+            raise ValueError("Authenticated hosting needs distinct ADMIN_TOKEN and AGENT_TOKEN (32+ characters)")
+
+    @property
+    def allowed_browser_origins(self) -> set[str]:
+        """Permit equivalent loopback names, never arbitrary request/forwarded hosts."""
+        origins = {self.PUBLIC_ORIGIN}
+        parsed = urlsplit(self.PUBLIC_ORIGIN)
+        if (parsed.scheme in {"http", "https"}
+                and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+                and parsed.username is None and parsed.password is None
+                and not parsed.path and not parsed.query and not parsed.fragment):
+            default_port = 443 if parsed.scheme == "https" else 80
+            port = f":{parsed.port}" if parsed.port and parsed.port != default_port else ""
+            origins.update(f"{parsed.scheme}://{host}{port}"
+                           for host in ("localhost", "127.0.0.1", "[::1]"))
+        return origins
 
     @property
     def is_gemini_enabled(self) -> bool:

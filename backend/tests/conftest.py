@@ -20,6 +20,10 @@ os.environ["AUTO_SCAN"] = "false"
 os.environ["AUTO_QUICK_SUMMARY"] = "false"
 os.environ["FILE_SETTLE_SECONDS"] = "0"
 os.environ["GEMINI_API_KEY"] = ""  # Force empty API key to test offline mode
+os.environ["AUTH_REQUIRED"] = "false"
+os.environ["STORAGE_PROVIDER"] = "local"
+os.environ["CACHE_FOLDER"] = str(test_dir / "cache")
+os.environ["VM_JOBS_ENABLED"] = "false"
 
 from app.database import init_db
 from app.settings import settings
@@ -41,6 +45,7 @@ def clean_db():
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM reels")
+        cursor.execute("DELETE FROM preview_assets")
         cursor.execute("DELETE FROM summary_jobs")
         cursor.execute("DELETE FROM archive_state")
         cursor.execute("DELETE FROM ai_usage")

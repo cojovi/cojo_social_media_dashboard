@@ -58,6 +58,10 @@ def init_db():
         "quick_summary_model": "TEXT",
         "quick_summary_at": "TEXT",
         "ai_quality_notes": "TEXT",
+        "storage_provider": "TEXT NOT NULL DEFAULT 'local'",
+        "provider_id": "TEXT",
+        "provider_path": "TEXT",
+        "content_hash": "TEXT",
     }
     pending = {k: v for k, v in additions.items() if k not in columns}
     conn.commit()
@@ -92,8 +96,36 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_summary_jobs_pending ON summary_jobs(status, available_at);
         CREATE INDEX IF NOT EXISTS idx_usage_created ON ai_usage(created_at);
         CREATE INDEX IF NOT EXISTS idx_reels_status ON reels(status);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_reels_provider ON reels(storage_provider, provider_id)
+            WHERE provider_id IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS transfer_jobs (
+            id TEXT PRIMARY KEY, kind TEXT NOT NULL, reel_id INTEGER REFERENCES reels(id) ON DELETE CASCADE,
+            source_version TEXT, status TEXT NOT NULL, result TEXT, error TEXT,
+            created_at REAL NOT NULL, updated_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_transfer_pending ON transfer_jobs(status, created_at);
+        CREATE TABLE IF NOT EXISTS cache_entries (
+            key TEXT PRIMARY KEY, size INTEGER NOT NULL, state TEXT NOT NULL, accessed_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS preview_assets (
+            key TEXT PRIMARY KEY, reel_id INTEGER REFERENCES reels(id) ON DELETE SET NULL,
+            status TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0,
+            duration REAL NOT NULL DEFAULT 0, priority INTEGER NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0, available_at REAL NOT NULL DEFAULT 0,
+            accessed_at REAL NOT NULL DEFAULT 0, error TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_preview_pending ON preview_assets(status, available_at, priority);
+        CREATE TABLE IF NOT EXISTS publication_attempts (
+            id TEXT PRIMARY KEY, reel_id INTEGER NOT NULL REFERENCES reels(id) ON DELETE CASCADE,
+            platform TEXT NOT NULL, account TEXT NOT NULL, idempotency_key TEXT UNIQUE NOT NULL,
+            status TEXT NOT NULL, source_version TEXT, caption TEXT NOT NULL, hashtags TEXT,
+            lease_until REAL NOT NULL, external_id TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_publication_active
+            ON publication_attempts(reel_id, platform, account)
+            WHERE status IN ('claimed','publishing','uncertain','posted');
     """)
-    conn.execute("PRAGMA user_version=1")
+    conn.execute("PRAGMA user_version=2")
     conn.commit()
     conn.close()
 

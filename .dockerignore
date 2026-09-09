@@ -1,0 +1,14 @@
+*
+!AGENT_API.md
+!backend/
+!backend/app/
+!backend/app/**
+!backend/tests/
+!backend/tests/**
+!backend/requirements.txt
+!backend/requirements-vm.txt
+!frontend/
+!frontend/dist/
+!frontend/dist/**
+**/__pycache__
+**/.pytest_cache

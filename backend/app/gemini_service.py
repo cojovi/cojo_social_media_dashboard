@@ -43,7 +43,7 @@ def parse_ai_json(text: str) -> Dict[str, Any]:
     except (json.JSONDecodeError, ValueError) as exc:
         raise GeminiServiceError("Gemini returned an invalid analysis. Existing captions were preserved.") from exc
 
-def analyze_video_with_gemini(video_path: str, reel_id: int | None = None) -> Dict[str, Any]:
+def analyze_video_with_gemini(video_path: str, reel_id: int | None = None, mime_type: str | None = None) -> Dict[str, Any]:
     """
     Uploads a local video file to Gemini Files API, waits for processing,
     then requests an analysis utilizing the specified model and settings.
@@ -65,7 +65,7 @@ def analyze_video_with_gemini(video_path: str, reel_id: int | None = None) -> Di
     try:
         logger.info(f"Uploading {v_path.name} to Gemini Files API...")
         # Upload using the modern client.files.upload
-        uploaded_file = client.files.upload(file=v_path)
+        uploaded_file = client.files.upload(file=v_path, config=types.UploadFileConfig(mime_type=mime_type) if mime_type else None)
         logger.info(f"File uploaded. Name: {uploaded_file.name}. State: {uploaded_file.state}")
         
         # Poll for processing complete

@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:vm": "node tests/vm-smoke.mjs",
+    "test:unit": "node --experimental-strip-types --test tests/library.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.16.0",
@@ -16,6 +18,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/vite": "^4.3.0",
     "@types/node": "^24.12.3",
     "@types/react": "^19.2.14",

@@ -35,6 +35,13 @@ def small_jpeg(data: bytes) -> bytes:
 
 
 def prepare_stills(reel: dict):
+    if reel.get('storage_provider') == 'dropbox':
+        from .media_cache import local_media
+        with local_media(reel) as cached_path:
+            stat = cached_path.stat()
+            local_reel = dict(reel, filepath=str(cached_path), storage_provider='local',
+                              source_version=f'{stat.st_size}:{stat.st_mtime_ns}', _cached=True)
+            return prepare_stills(local_reel)
     path = Path(reel['filepath'])
     local = storage_status(str(path)) == 'local'
     duration = reel['duration_seconds']
@@ -43,7 +50,7 @@ def prepare_stills(reel: dict):
         version = f'{before.st_size}:{before.st_mtime_ns}'
         if reel.get('source_version') and version != reel['source_version']:
             raise WaitingForLocalMedia('Video changed since the last scan; waiting for rediscovery.')
-        if time.time() - before.st_mtime < settings.FILE_SETTLE_SECONDS:
+        if not reel.get('_cached') and time.time() - before.st_mtime < settings.FILE_SETTLE_SECONDS:
             raise WaitingForLocalMedia('Waiting for file transfer to finish.')
         if shutil.which('ffmpeg'):
             duration = duration or get_video_duration(str(path))

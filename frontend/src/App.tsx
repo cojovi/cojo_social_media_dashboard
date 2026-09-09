@@ -2,24 +2,32 @@ import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } fr
 import { 
   Film, CheckCircle2, AlertCircle, FileText, Send, Archive, 
   Settings as SettingsIcon, Search, RefreshCw, Sparkles, 
-  Copy, Trash2, Video, Info, Folder, ChevronRight, ChevronDown, StickyNote, ScanEye, X,
-  CheckSquare, Square, ListChecks, Loader2
+  Copy, Trash2, Video, Info, Folder, StickyNote, ScanEye, X,
+  CheckSquare, Square, ListChecks, Loader2, Play
 } from 'lucide-react';
 import { api } from './api';
-import type { Reel, StatusCounts, HealthStatus, ArchiveStatus } from './api';
+import type { Reel, StatusCounts, HealthStatus, ArchiveStatus, LibraryItem } from './api';
 import { ArchivePanel } from './ArchivePanel';
+import { StoragePanel } from './StoragePanel';
+import { ReelPreview } from './ReelPreview';
 import { useAnalysisQueue } from './useAnalysisQueue';
+import { FolderSidebar, FolderLocation } from './FolderNavigation';
+import { DuplicateCopiesDialog } from './DuplicateCopiesDialog';
 import {
-  buildFolderTree,
+  buildLibraryIndex,
   filterReelsByFolder,
-  countReelsInFolder,
   getRelativeFolder,
-  type FolderNode,
+  folderKey,
+  exactCopyKey,
+  groupExactCopies,
 } from './folders';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'all' | 'draft' | 'needs_review' | 'ready' | 'posted' | 'archived' | 'settings'>('all');
   const [reels, setReels] = useState<Reel[]>([]);
+  const [libraryItems, setLibraryItems] = useState<LibraryItem[]>([]);
+  const [groupCopies, setGroupCopies] = useState(true);
+  const [copyGroupKey, setCopyGroupKey] = useState<string | null>(null);
   const [stats, setStats] = useState<StatusCounts | null>(null);
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -28,8 +36,9 @@ export default function App() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [editingReel, setEditingReel] = useState<Reel | null>(null);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [quickLookReel, setQuickLookReel] = useState<Reel | null>(null);
+  const [previewReelId, setPreviewReelId] = useState<number | null>(null);
+  const closePreview = useCallback(() => setPreviewReelId(null), []);
   const [archiveStatus, setArchiveStatus] = useState<ArchiveStatus | null>(null);
   const [availability, setAvailability] = useState('');
   const [gridPage, setGridPage] = useState({ key: '', limit: 60 });
@@ -79,11 +88,12 @@ export default function App() {
         availability: availability || undefined,
       };
       if (activeTab !== 'all' && activeTab !== 'settings') params.status = activeTab;
-      const [counts, health, list, archive] = await Promise.all([
-        api.getStats(), api.getHealth(), api.getReels(params), api.getArchiveStatus(),
+      const [counts, health, list, archive, library] = await Promise.all([
+        api.getStats(), api.getHealth(), api.getReels(params), api.getArchiveStatus(), api.getLibraryIndex(),
       ]);
       if (request !== requestVersion.current) return;
       setStats(counts); setHealth(health); setReels(list); setArchiveStatus(archive);
+      setLibraryItems(library);
     } catch (error) {
       if (!background) addToast(error instanceof Error ? error.message : 'Failed to load archive.', 'error');
     } finally {
@@ -99,16 +109,25 @@ export default function App() {
   }, [loadData]);
 
   const reelsRoot = health?.reels_folder_path || '';
-  const folderTree = useMemo(
-    () => (reelsRoot ? buildFolderTree(reels, reelsRoot) : []),
-    [reels, reelsRoot]
+  const library = useMemo(
+    () => buildLibraryIndex(libraryItems, reelsRoot, availability === 'missing'),
+    [libraryItems, reelsRoot, availability]
+  );
+  // Null is the home destination, not "all locations". Derive it from the source
+  // index so it works both on the Mac root and inside the Dropbox wrapper folder.
+  const currentFolder = library.nodes.get(folderKey(selectedFolder ?? library.home.path, reelsRoot)) || library.home;
+  const folderReels = useMemo(
+    () => activeTab === 'all' ? filterReelsByFolder(reels, reelsRoot, currentFolder.path) : reels,
+    [reels, reelsRoot, currentFolder.path, activeTab]
   );
   const displayedReels = useMemo(
-    () => (activeTab === 'all' && reelsRoot ? filterReelsByFolder(reels, reelsRoot, selectedFolder) : reels),
-    [reels, reelsRoot, selectedFolder, activeTab]
+    () => groupCopies ? groupExactCopies(folderReels) : folderReels,
+    [folderReels, groupCopies]
   );
+  const duplicateCopies = copyGroupKey ? library.copies.get(copyGroupKey) : undefined;
 
-  const gridKey = JSON.stringify([activeTab, searchTerm, hasFinalPost, hasAiSummary, hasQuickSummary, availability, selectedFolder]);
+  const gridKey = JSON.stringify([activeTab, searchTerm, hasFinalPost, hasAiSummary, hasQuickSummary, availability, currentFolder.path, groupCopies]);
+  useEffect(() => () => closePreview(), [gridKey, closePreview]);
   const visibleLimit = gridPage.key === gridKey ? gridPage.limit : 60;
   const renderedReels = displayedReels.slice(0, visibleLimit);
 
@@ -305,16 +324,8 @@ export default function App() {
     return 'Waiting for a quick description. Open workbench to add notes.';
   };
 
-  const toggleFolderExpanded = (path: string) => {
-    setExpandedFolders(prev => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  };
-
   const handleQuickLook = (reel: Reel) => {
+    setPreviewReelId(null);
     setQuickLookReel(reel);
     if (!reel.thumbnail_path) {
       void api.generateThumbnail(reel.id).then(updated => {
@@ -325,14 +336,14 @@ export default function App() {
 
   const handleScan = async () => {
     setScanning(true);
-    addToast("Scanning local folder for new video assets...", "warning");
+    addToast("Checking folder contents, moves, renames and deletions...", "warning");
     try {
       const result = await api.scanFolder();
       addToast(
-        `Scan complete: ${result.scanned_count} files, ${result.added_count} new, ${result.missing_count} missing/moved, ${result.skipped_count} empty or still arriving.`,
+        `Scan complete: ${result.scanned_count} files, ${result.added_count} new, ${result.moved_count ?? 0} moved/renamed, ${result.missing_count} missing, ${result.skipped_count} empty or still arriving.`,
         "success"
       );
-      loadData();
+      await loadData();
     } catch (error: unknown) {
       addToast((error instanceof Error ? error.message : '') || "Failed to scan folder.", "error");
     } finally {
@@ -356,6 +367,7 @@ export default function App() {
   };
 
   const handleSelectReel = async (reel: Reel) => {
+    setPreviewReelId(null);
     if (editingReel?.id === reel.id) return;
 
     if (editingReel && editingReel.id !== reel.id) {
@@ -385,13 +397,29 @@ export default function App() {
     }
   };
 
+  const clearFilters = () => {
+    setSearchTerm(''); setHasFinalPost(null); setHasAiSummary(null);
+    setHasQuickSummary(null); setAvailability(''); clearSelection();
+  };
+
+  const handleNavigateFolder = async (path: string) => {
+    if (!await handleCloseWorkbench()) return;
+    setSelectedFolder(path); setActiveTab('all'); setSelectionMode(false);
+    setCopyGroupKey(null); clearFilters();
+  };
+
+  const handleOpenCopy = async (id: number) => {
+    const copy = await api.getReel(id);
+    return (await handleSelectReel(copy)) !== false;
+  };
+
   const handleSaveReel = async () => {
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     await persistReel();
   };
 
   const handleAnalyze = (id: number) => {
-    const reel = reels.find(r => r.id === id);
+    const reel = reels.find(r => r.id === id) || (editingReel?.id === id ? editingReel : null);
     if (reel) enqueueAnalysis([reel]);
   };
 
@@ -472,46 +500,10 @@ export default function App() {
     }
   };
 
-  const renderFolderNode = (node: FolderNode, depth = 0) => {
-    const hasChildren = node.children.length > 0;
-    const isExpanded = expandedFolders.has(node.path);
-    const isSelected = selectedFolder === node.path;
-    const nestedCount = countReelsInFolder(reels, reelsRoot, node.path);
-
-    return (
-      <div key={node.path}>
-        <button
-          onClick={() => setSelectedFolder(node.path)}
-          className={`w-full flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-left text-xs transition-all cursor-pointer ${
-            isSelected
-              ? 'bg-neon-cyan/15 text-neon-cyan border border-neon-cyan/40'
-              : 'text-purple-300 hover:bg-plum-900/60 hover:text-white border border-transparent'
-          }`}
-          style={{ paddingLeft: `${8 + depth * 14}px` }}
-        >
-          {hasChildren ? (
-            <span
-              onClick={(e) => { e.stopPropagation(); toggleFolderExpanded(node.path); }}
-              className="shrink-0 p-0.5 rounded hover:bg-plum-800"
-            >
-              {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-            </span>
-          ) : (
-            <span className="w-4 shrink-0" />
-          )}
-          <Folder className="w-3.5 h-3.5 shrink-0 opacity-80" />
-          <span className="truncate flex-1 font-medium">{node.name}</span>
-          <span className="text-[10px] opacity-70 shrink-0">{nestedCount}</span>
-        </button>
-        {hasChildren && isExpanded && (
-          <div>{node.children.map(child => renderFolderNode(child, depth + 1))}</div>
-        )}
-      </div>
-    );
-  };
-
   return (
     <div className="h-screen overflow-hidden bg-plum-950 flex font-sans select-none relative retro-scanlines">
+      {duplicateCopies && <DuplicateCopiesDialog copies={duplicateCopies} reelsRoot={reelsRoot}
+        onClose={() => setCopyGroupKey(null)} onOpen={handleOpenCopy} />}
       {/* Toast System */}
       <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-3 max-w-sm">
         {toasts.map(t => (
@@ -533,7 +525,7 @@ export default function App() {
       </div>
 
       {/* Left Sidebar Navigation */}
-      <aside className="w-64 border-r border-plum-800 bg-plum-950/90 flex flex-col shrink-0">
+      <aside className="w-64 border-r border-plum-800 bg-plum-950/90 hidden md:flex flex-col shrink-0">
         {/* Brand Logo */}
         <div className="h-20 flex items-center gap-3 px-6 border-b border-plum-800">
           <Film className="w-8 h-8 text-neon-cyan animate-pulse" />
@@ -541,14 +533,14 @@ export default function App() {
             <h1 className="text-xl font-retro font-bold tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-neon-cyan to-neon-pink text-retro-glow">
               REELVAULT
             </h1>
-            <p className="text-[9px] font-pixel text-neon-pink/80 tracking-tighter">LOCAL QUEUE</p>
+            <p className="text-[9px] font-pixel text-neon-pink/80 tracking-tighter">ARCHIVE QUEUE</p>
           </div>
         </div>
 
         {/* Tab Items */}
         <nav className="flex-1 px-4 py-6 flex flex-col gap-2">
           {[
-            { id: 'all', label: 'All Reels', icon: Film },
+            { id: 'all', label: 'Home', icon: Film },
             { id: 'draft', label: 'Drafts', icon: FileText },
             { id: 'needs_review', label: 'Needs Review', icon: AlertCircle },
             { id: 'ready', label: 'Ready Queue', icon: CheckCircle2, highlight: true },
@@ -560,7 +552,7 @@ export default function App() {
             return (
               <button
                 key={tab.id}
-                onClick={async () => { if (!await handleCloseWorkbench()) return; setSelectedFolder(null); setSelectionMode(false); clearSelection(); setActiveTab(tab.id as typeof activeTab); }}
+                onClick={async () => { if (!await handleCloseWorkbench()) return; setSelectedFolder(null); setSelectionMode(false); clearSelection(); setActiveTab(tab.id as typeof activeTab); if (tab.id === 'all') clearFilters(); }}
                 className={`w-full flex items-center justify-between px-4 py-3 rounded-lg border transition-all duration-200 cursor-pointer ${
                   isActive 
                     ? tab.highlight 
@@ -577,12 +569,13 @@ export default function App() {
                   <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
                     isActive ? 'bg-plum-950 text-white' : 'bg-plum-900 text-purple-400'
                   }`}>
-                    {stats[tab.id as keyof StatusCounts]}
+                    {tab.id === 'all' ? library.home.count : stats[tab.id as keyof StatusCounts]}
                   </span>
                 )}
               </button>
             );
           })}
+          <p className="text-[10px] text-purple-400/70 px-4 mt-2 leading-relaxed">Home shows your main folder. Workflow queues span all folders; their counts include copies.</p>
         </nav>
 
         {/* System Health Summary & Settings link */}
@@ -604,7 +597,7 @@ export default function App() {
               <span className={`w-2.5 h-2.5 rounded-full ${health?.gemini_configured ? 'bg-green-500 shadow-[0_0_6px_#22c55e]' : 'bg-red-500'}`} />
               AI: {health?.gemini_configured ? 'GEMINI ON' : 'OFFLINE'}
             </span>
-            <span className="opacity-80">v1.1.0</span>
+            <span className="opacity-80">v2.0.0</span>
           </div>
         </div>
       </aside>
@@ -612,19 +605,25 @@ export default function App() {
       {/* Main Command Workspace */}
       <main className="flex-1 flex flex-col min-w-0 bg-plum-900/20 overflow-hidden">
         {/* Top App Bar */}
-        <header className="h-20 border-b border-plum-800 px-8 flex items-center justify-between shrink-0 glass-panel">
+        <header className="h-20 border-b border-plum-800 px-3 md:px-8 flex items-center justify-between gap-2 shrink-0 glass-panel">
           <div className="flex items-center gap-3">
-            <h2 className="text-xl font-retro font-semibold tracking-wider text-white">
-              {activeTab === 'settings' ? 'SETTINGS CONTROL' : `${activeTab.replace('_', ' ').toUpperCase()} ARCHIVE`}
+            <select aria-label="Navigate archive" value={activeTab} className="md:hidden max-w-36 bg-plum-950 border border-plum-700 rounded-lg p-2 text-sm text-neon-cyan"
+              onChange={async event => {
+                const tab = event.target.value as typeof activeTab;
+                if (!await handleCloseWorkbench()) return;
+                closePreview(); setSelectedFolder(null); setSelectionMode(false); clearSelection(); setActiveTab(tab);
+                if (tab === 'all') clearFilters();
+              }}>
+              <option value="all">Home</option><option value="draft">Drafts</option>
+              <option value="needs_review">Needs Review</option><option value="ready">Ready Queue</option>
+              <option value="posted">Posted</option><option value="archived">Archived</option><option value="settings">Settings</option>
+            </select>
+            <h2 className="sr-only md:not-sr-only md:text-xl font-retro font-semibold tracking-wider text-white">
+              {activeTab === 'settings' ? 'SETTINGS CONTROL' : activeTab === 'all' ? 'REEL LIBRARY' : `${activeTab.replace('_', ' ').toUpperCase()} ARCHIVE`}
             </h2>
             {activeTab !== 'settings' && displayedReels.length > 0 && (
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-plum-800 text-purple-300 font-bold border border-plum-700">
                 {displayedReels.length} Reels
-                {activeTab === 'all' && selectedFolder !== null && (
-                  <span className="text-neon-cyan ml-1">
-                    · {selectedFolder === '' ? 'Root' : selectedFolder}
-                  </span>
-                )}
               </span>
             )}
           </div>
@@ -644,7 +643,7 @@ export default function App() {
                 }`}
               >
                 <ListChecks className="w-4 h-4" />
-                <span>{selectionMode ? 'Done Selecting' : 'Select Reels'}</span>
+                <span className="sr-only sm:not-sr-only">{selectionMode ? 'Done Selecting' : 'Select Reels'}</span>
               </button>
             )}
             {activeTab !== 'settings' && (
@@ -655,17 +654,18 @@ export default function App() {
                 className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-neon-pink to-neon-orange text-white rounded-lg text-sm font-semibold border border-neon-pink hover:opacity-90 active:scale-95 shadow-[0_0_10px_rgba(255,0,127,0.4)] disabled:opacity-50 transition-all cursor-pointer"
               >
                 <RefreshCw className={`w-4 h-4 ${scanning || archiveStatus?.scan.running ? 'animate-spin' : ''}`} />
-                <span>{scanning || archiveStatus?.scan.running ? 'Scanning…' : 'Rescan Folder'}</span>
+                <span className="sr-only sm:not-sr-only">{scanning || archiveStatus?.scan.running ? 'Scanning…' : 'Rescan Folder'}</span>
               </button>
             )}
           </div>
         </header>
 
         {/* Content Box */}
-        <div className="flex-1 p-8 flex gap-8 overflow-hidden min-h-0">
+        <div className="flex-1 p-3 md:p-8 flex gap-8 overflow-hidden min-h-0">
           {activeTab === 'settings' ? (
             /* Settings View Page */
             <div className="w-full max-w-3xl flex flex-col gap-6 overflow-y-auto pr-2">
+              <StoragePanel />
               <ArchivePanel status={archiveStatus} onRefresh={() => void loadData(true)} onToast={addToast} onScan={() => void handleScan()} />
               <div className="glass-panel rounded-xl border border-plum-800 p-6 flex flex-col gap-6 shadow-xl">
                 <div className="flex items-center gap-3 border-b border-plum-800 pb-4">
@@ -745,7 +745,8 @@ export default function App() {
                     <Search className="w-4 h-4 text-purple-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input 
                       type="text"
-                      placeholder="Search descriptions, subjects, tags, captions, notes..."
+                      aria-label={activeTab === 'all' ? 'Search this folder' : 'Search workflow queue'}
+                      placeholder={activeTab === 'all' ? 'Search this folder: descriptions, tags, notes…' : 'Search descriptions, subjects, tags, captions, notes…'}
                       value={searchTerm}
                       onChange={e => setSearchTerm(e.target.value)}
                       className="w-full bg-plum-950 border border-plum-800 rounded-lg pl-10 pr-4 py-2 text-sm text-white focus:outline-none focus:border-neon-cyan/80 transition-all font-sans"
@@ -754,7 +755,7 @@ export default function App() {
                   
                   <div className="flex items-center gap-4 flex-wrap">
                     <select aria-label="File availability" value={availability} onChange={e => setAvailability(e.target.value)} className="bg-plum-950 border border-plum-800 text-xs text-purple-200 rounded-lg p-2">
-                      <option value="">Any storage</option><option value="local">On this Mac</option><option value="cloud">Offloaded</option><option value="missing">Missing / moved</option>
+                      <option value="">Available files</option><option value="local">On this Mac</option><option value="cloud">Offloaded</option><option value="missing">Missing files (history)</option>
                     </select>
                     <select aria-label="Quick description" value={hasQuickSummary === null ? '' : String(hasQuickSummary)} onChange={e => setHasQuickSummary(e.target.value === '' ? null : e.target.value === 'true')} className="bg-plum-950 border border-plum-800 text-xs text-purple-200 rounded-lg p-2">
                       <option value="">Any description</option><option value="true">Quick description saved</option><option value="false">No quick description</option>
@@ -789,43 +790,22 @@ export default function App() {
 
                 {/* Scrollable Reels List Grid Container */}
                 <div className="flex-1 flex gap-4 min-h-0 overflow-hidden">
-                  {activeTab === 'all' && reelsRoot && (
-                    <div className="w-56 shrink-0 glass-panel rounded-xl border border-plum-800 flex flex-col overflow-hidden shadow-md">
-                      <div className="p-3 border-b border-plum-800 flex items-center gap-2">
-                        <Folder className="w-4 h-4 text-neon-cyan" />
-                        <span className="text-xs font-bold uppercase text-purple-300 tracking-wider">Folders</span>
-                      </div>
-                      <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-0.5">
-                        <button
-                          onClick={() => setSelectedFolder(null)}
-                          className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-xs transition-all cursor-pointer ${
-                            selectedFolder === null
-                              ? 'bg-neon-cyan/15 text-neon-cyan border border-neon-cyan/40'
-                              : 'text-purple-300 hover:bg-plum-900/60 hover:text-white border border-transparent'
-                          }`}
-                        >
-                          <Film className="w-3.5 h-3.5 shrink-0" />
-                          <span className="flex-1 font-medium">All Reels</span>
-                          <span className="text-[10px] opacity-70">{reels.length}</span>
-                        </button>
-                        <button
-                          onClick={() => setSelectedFolder('')}
-                          className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-xs transition-all cursor-pointer ${
-                            selectedFolder === ''
-                              ? 'bg-neon-cyan/15 text-neon-cyan border border-neon-cyan/40'
-                              : 'text-purple-300 hover:bg-plum-900/60 hover:text-white border border-transparent'
-                          }`}
-                        >
-                          <Folder className="w-3.5 h-3.5 shrink-0" />
-                          <span className="flex-1 font-medium">Root (no folder)</span>
-                          <span className="text-[10px] opacity-70">{countReelsInFolder(reels, reelsRoot, '')}</span>
-                        </button>
-                        {folderTree.map(node => renderFolderNode(node))}
-                      </div>
-                    </div>
-                  )}
+                  {activeTab === 'all' && reelsRoot && <FolderSidebar library={library} current={currentFolder}
+                    reelsRoot={reelsRoot} onNavigate={path => { void handleNavigateFolder(path); }} />}
 
                   <div className="flex-1 overflow-y-auto pr-1 min-w-0">
+                  {activeTab === 'all' && reelsRoot && <FolderLocation library={library} current={currentFolder}
+                    reelsRoot={reelsRoot} onNavigate={path => { void handleNavigateFolder(path); }} />}
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-4 text-xs text-purple-300">
+                    <p aria-live="polite">{displayedReels.length.toLocaleString()} {groupCopies ? 'unique reels' : 'files'}
+                      {activeTab === 'all' ? ' in this folder' : ' across all folders'}
+                      {groupCopies && folderReels.length > displayedReels.length && <span className="text-purple-400"> · {folderReels.length - displayedReels.length} extra copies grouped</span>}
+                    </p>
+                    <label className="flex items-center gap-2 cursor-pointer rounded focus-within:outline-neon-cyan">
+                      <input type="checkbox" checked={groupCopies} onChange={event => { setGroupCopies(event.target.checked); clearSelection(); }} className="accent-cyan-400" />
+                      Group exact copies
+                    </label>
+                  </div>
                   {loading ? (
                     <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-6">
                       {[1, 2, 3, 4].map(n => (
@@ -840,8 +820,9 @@ export default function App() {
                     <div className="glass-panel rounded-xl border border-plum-850 p-12 text-center flex flex-col items-center justify-center gap-4 flex-1">
                       <Film className="w-12 h-12 text-purple-500/50" />
                       <div>
-                        <p className="text-lg font-retro font-bold text-purple-300">Archive matches no records</p>
-                        <p className="text-sm text-purple-400/80 mt-1 max-w-sm">No reels correspond to your filters. Click 'Rescan Folder' to import videos or clear your search term.</p>
+                        <p className="text-lg font-retro font-bold text-purple-300">{activeTab === 'all' ? 'No matching reels in this folder' : 'No matching reels'}</p>
+                        <p className="text-sm text-purple-400/80 mt-1 max-w-sm">{activeTab === 'all' && currentFolder.children.length ? 'Choose a folder above to see its reels. Files in subfolders are not included here.' : 'Try clearing your filters, or rescan after adding new videos.'}</p>
+                        <button type="button" onClick={clearFilters} className="archive-button mt-4">Clear filters</button>
                       </div>
                     </div>
                   ) : (
@@ -852,11 +833,13 @@ export default function App() {
                         const hasNotes = reel.notes && reel.notes.trim();
                         const isEditing = editingReel?.id === reel.id;
                         const folderLabel = reelsRoot ? getRelativeFolder(reel.filepath, reelsRoot) : '';
+                        const copies = library.copies.get(exactCopyKey(reel));
                         
                         return (
                           <div 
                             key={reel.id} 
                             onClick={() => {
+                              setPreviewReelId(null);
                               if (selectionMode) {
                                 toggleReelSelection(reel.id);
                                 return;
@@ -873,6 +856,19 @@ export default function App() {
                           >
                             {/* Card Thumbnail / Header Preview */}
                             <div className="h-[340px] bg-plum-950 relative overflow-hidden flex items-center justify-center shrink-0 border-b border-plum-850">
+                              {previewReelId === reel.id ? <ReelPreview key={`${reel.id}:${reel.source_version}`}
+                                reelId={reel.id} filename={reel.filename} onClose={closePreview}
+                                onFullVideo={() => handleQuickLook(reel)} /> : !selectionMode && reel.storage_status !== 'missing' && (
+                                <button type="button" aria-label={`Preview ${reel.filename}`}
+                                  onClick={event => {
+                                    event.stopPropagation();
+                                    document.querySelectorAll('video').forEach(video => video.pause());
+                                    setQuickLookReel(null); setPreviewReelId(reel.id);
+                                  }}
+                                  className="absolute bottom-12 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 rounded-full px-4 py-2 bg-plum-950/95 border border-neon-cyan/70 text-neon-cyan text-xs font-bold shadow-lg hover:bg-neon-cyan hover:text-plum-950 focus-visible:outline-2 focus-visible:outline-white">
+                                  <Play size={15} fill="currentColor" /> Preview
+                                </button>
+                              )}
                               {selectionMode && (
                                 <button
                                   type="button"
@@ -947,12 +943,16 @@ export default function App() {
                                   </span>
                                 </div>
 
-                                {folderLabel && (
-                                  <p className="text-[10px] text-purple-400/90 truncate font-mono flex items-center gap-1" title={folderLabel}>
+                                <button type="button" onClick={event => { event.stopPropagation(); void handleNavigateFolder(folderLabel); }}
+                                  className="text-[10px] text-purple-400/90 hover:text-neon-cyan font-mono flex items-center gap-1 text-left min-w-0 rounded focus-visible:outline-neon-cyan" title={`Open ${folderLabel || library.root.name}`}>
                                     <Folder className="w-3 h-3 shrink-0" />
-                                    {folderLabel}
-                                  </p>
-                                )}
+                                    <span className="truncate">{folderLabel || library.root.name}</span>
+                                </button>
+                                {copies && copies.length > 1 && <button type="button"
+                                  onClick={event => { event.stopPropagation(); setCopyGroupKey(exactCopyKey(reel)); }}
+                                  className="self-start flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-md bg-neon-cyan/10 text-neon-cyan border border-neon-cyan/25 hover:bg-neon-cyan/20 focus-visible:outline-neon-cyan">
+                                  <Copy size={12} />{copies.length} exact copies · View
+                                </button>}
 
                                 {/* Caption Excerpt */}
                                 <p className={`text-xs line-clamp-2 break-words shrink-0 ${

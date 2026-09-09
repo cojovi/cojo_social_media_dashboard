@@ -4,6 +4,9 @@ export interface Reel {
   filepath: string;
   file_extension: string;
   file_size: number;
+  storage_provider: 'local' | 'dropbox';
+  content_hash: string | null;
+  source_version: string | null;
   duration_seconds: number;
   thumbnail_path: string | null;
   created_at: string;
@@ -33,6 +36,8 @@ export interface Reel {
   ai_quality_notes: string | null;
 }
 
+export type LibraryItem = Pick<Reel, 'id' | 'filename' | 'filepath' | 'file_size' | 'storage_provider' | 'content_hash' | 'status' | 'storage_status'>;
+
 export interface StatusCounts {
   all: number;
   draft: number;
@@ -59,6 +64,7 @@ export interface ScanResult {
   updated_count: number;
   missing_count: number;
   skipped_count: number;
+  moved_count: number;
 }
 
 export interface ThumbnailBackfillResult {
@@ -69,6 +75,7 @@ export interface ThumbnailBackfillResult {
 }
 
 export interface ArchiveStatus {
+  storage_provider: 'local' | 'dropbox';
   scan: { running?: boolean; finished_at?: string; error?: string; added?: number; scanned?: number; skipped?: number };
   scan_interval_seconds: number;
   auto_scan: boolean;
@@ -85,7 +92,7 @@ export interface ArchiveStatus {
 }
 
 // Global fetch helper with error handling
-async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
+export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...options,
     headers: {
@@ -95,10 +102,11 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   });
   
   if (!response.ok) {
+    if (response.status === 401) window.dispatchEvent(new Event('reelvault-session-expired'));
     let message = `API request failed with status ${response.status}`;
     try {
       const errorData = await response.json();
-      message = errorData.detail || message;
+      message = typeof errorData.detail === 'string' ? errorData.detail : message;
     } catch {
       // ignore
     }
@@ -108,7 +116,36 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export interface Job<T = unknown> {
+  id: string; kind: string; reel_id: number | null;
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  result: T; error: string | null;
+}
+
+export interface PreviewInfo {
+  status: 'not_generated' | 'queued' | 'running' | 'ready' | 'failed' | 'evicted' | 'unavailable';
+  key: string; bytes: number; duration_seconds: number; url: string | null; error: string | null;
+}
+
+export interface PreviewStorage {
+  jobs: Record<string, number>; bytes: number; reserved_bytes: number; budget_bytes: number;
+  auto_enabled: boolean; paused: boolean; blocked_reason: string | null; delay_seconds: number;
+}
+
+async function submitJob<T>(path: string): Promise<T> {
+  let job = await apiFetch<Job<T>>(path, { method: 'POST' });
+  const deadline = Date.now() + 15 * 60 * 1000;
+  while (job.status === 'queued' || job.status === 'running') {
+    if (Date.now() > deadline) throw new Error(`Job ${job.id} is still running. Check Settings for its result.`);
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    job = await apiFetch<Job<T>>(`/api/v1/jobs/${job.id}`);
+  }
+  if (job.status === 'failed') throw new Error(job.error || 'Background job failed.');
+  return job.result;
+}
+
 export const api = {
+  getLibraryIndex: () => apiFetch<LibraryItem[]>('/api/reels/library'),
   getArchiveStatus: () => apiFetch<ArchiveStatus>('/api/archive'),
   describeMissing: (reelIds?: number[], retry = false) => apiFetch<{ queued: number }>('/api/archive/describe', {
     method: 'POST', body: JSON.stringify({ reel_ids: reelIds, retry }),
@@ -147,17 +184,21 @@ export const api = {
       body: JSON.stringify(data),
     }),
     
-  scanFolder: () => apiFetch<ScanResult>('/api/reels/scan', { method: 'POST' }),
+  scanFolder: async (): Promise<ScanResult> => {
+    const result = await submitJob<{ scanned: number; added: number; updated: number; moved?: number; missing: number; skipped: number }>('/api/v1/storage/refresh');
+    return { status: 'success', scanned_count: result.scanned, added_count: result.added, updated_count: result.updated,
+      missing_count: result.missing, skipped_count: result.skipped, moved_count: result.moved ?? 0 };
+  },
 
   backfillThumbnails: (limit = 15) =>
     apiFetch<ThumbnailBackfillResult>(`/api/reels/thumbnails/backfill?limit=${limit}`, { method: 'POST' }),
 
   generateThumbnail: (id: number) =>
-    apiFetch<Reel>(`/api/reels/${id}/thumbnail`, { method: 'POST' }),
+    submitJob<Reel>(`/api/v1/reels/${id}/thumbnail`),
   
   getStats: () => apiFetch<StatusCounts>('/api/reels/stats'),
   
-  analyzeReel: (id: number) => apiFetch<Reel>(`/api/reels/${id}/analyze`, { method: 'POST' }),
+  analyzeReel: (id: number) => submitJob<Reel>(`/api/v1/reels/${id}/analyze`),
   
   useAiCaption: (id: number) => apiFetch<Reel>(`/api/reels/${id}/use-ai-caption`, { method: 'POST' }),
   

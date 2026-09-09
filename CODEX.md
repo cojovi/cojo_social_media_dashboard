@@ -1,4 +1,256 @@
-# September 4, 2026 archive upgrade — current behavior
+# September 8, 2026 — Small browsing previews
+
+- `backend/app/previews.py`: durable serial ffmpeg worker, 9-second silent sampled H.264 clips at 360px/15fps, <=1 MB per clip; 1 GB separate budget including 5 MB scratch reservation. No paid AI calls.
+- Automatic metadata reconciliation every minute; explicit requests first, then cached originals. Dropbox generation uses the existing verified/pinned 5 GB cache; local automatic generation never hydrates placeholders. Exact hash/size copies share an asset. Editorial metadata is never changed.
+- Automatic backfill waits at capacity; explicit requests can evict unused LRU clips. Evicted assets are not automatically regenerated. Response pins, revision fences, free-disk reservations, failed-work cleanup and restart recovery protect the cache.
+- `ReelPreview.tsx` mounts only on click; one inline player, loading/retry/close/full-original actions, no hover/preload downloads, stops on filter/navigation/scroll-away/tab hiding. StoragePanel shows progress, bytes and persisted pause/resume. Small-screen navigation uses a select instead of the fixed sidebar.
+- `/api/v1/reels/{id}/preview` GET and `/preview/video?key=...` are agent-readable. Generation POST and `/api/v1/previews/pause` are owner-only. AGENT_API.md explicitly prohibits publishing the sampled preview in place of the claim revision's full download.
+- Settings: `AUTO_PREVIEWS=true`, `PREVIEW_MAX_BYTES=1000000000`, `PREVIEW_DELAY_SECONDS=10`. Previews live at DATABASE_PATH.parent / `previews`; VM_JOBS_ENABLED controls worker startup.
+- Deployed image `52ea0fed61baa4585a0163a82259a69b4f82b4853b13c47236a5de59983fdf53`; rollback `reelvault:vmtest-before-previews`; database backup `data/backups/reelvault-before-previews-20260908.db`. The live guide checksum is `68b71a170bbbb247a2942962af1b1c1ca00d1367a0cbd194e73306933585f786`.
+- At first verification the 1,300-record catalog mapped to 1,239 eligible shared preview assets: 1 ready, 1,238 queued, no failures. Reel 1300 produced a silent 360px H.264 clip, 9 seconds and 152,550 bytes, from a 116,583,852-byte original. Agent range delivery passed. Editorial fields and all five publication records exactly matched the backup; the 15-minute scan interval and original 5 GB budget remain intact. Backfill continues independently of browser sessions.
+- 98 backend tests passed both locally and in the Linux image; 13 frontend unit tests, build and lint passed. Chrome rendering/interaction checks used isolated synthetic media at localhost:18771 (1440x1050, 900x1100, 390x844), with no runtime errors. Browser plugin was unavailable; regular Playwright was used on the isolated fixture. Test screenshots/scripts are outside the repo at `/private/tmp/reelvault-preview-qa`. Live verification was API/media inspection, not a browser run against the private hosted URL. Safari remains unverified.
+- Final private HTTPS verification from the Tailscale VM host confirmed frontend asset `index-BO9XmtJw.js` and the new storage API: 10 previews ready using 2,290,669 bytes, 1 processing, 1,228 queued, no capacity block. Docker's resolver cannot resolve the private MagicDNS name; use the VM host or a tailnet-connected client for HTTPS checks, and container loopback for internal service checks. The isolated local QA server was stopped; live backfill remains running.
+
+# September 7, 2026 — Agent Ready → Posted handoff
+
+- `/api/v1/queue/ready` is agent-readable and shares the dashboard's strict readiness predicate. Keyset pagination and optional platform/account filters support quick selection without reading video bytes.
+- `/publications/{id}/complete` atomically records the external receipt and changes an unchanged Ready reel to Posted with its first `posted_at`. Repeated completion is safe. Late receipts preserve newer caption/media/workflow changes and return `reel_status` for explicit review.
+- The agent still publishes through its own authorized external platform connection. It cannot approve/edit drafts or blindly retry uncertain uploads.
+- `AGENT_API.md` now documents the complete workflow, eligibility, pagination, snapshot downloads, idempotency/lease recovery and status transition. The Docker image includes this file; `/api/v1/guide` serves the deployed copy with bearer authentication.
+
+# September 7, 2026 — Rescan reconciliation
+
+- Every Dropbox scan reconciles a fresh recursive metadata snapshot, including manual refresh jobs and the startup/15-minute worker. Successful scans repair stale paths/missing records; failed listings leave the catalog intact.
+- Provider IDs preserve editorial metadata, summaries and completed description jobs across moves/renames. Scan results report moved/renamed counts.
+- The dashboard list API defaults to available files. Missing entries remain addressable by ID and through `availability=missing`; the library index carries storage status so normal folder counts and copy lists exclude missing history.
+- File visibility changes only after Dropbox has synced them. iCloud is a separate source from the hosted Dropbox archive.
+
+# September 5, 2026 — Folder-first browsing and non-destructive exact copies
+
+The private Tailscale VM now serves the folder-navigation update on `vmtest`.
+**Home is `SnapIGTik Download`, not a recursive all-archive grid.** The Dropbox
+source wraps that folder one level below `/Cody Viveiros/SnapTik_Reel_Archive`;
+the local Mac source can already be the home folder itself. The frontend derives
+the correct home from the unfiltered catalog index without modifying storage paths.
+
+Each folder view shows only files directly inside it. Organizational folders have
+clickable tiles, a desktop folder sidebar, direct unique-reel counts and breadcrumb
+navigation. Intermediate folders with no directly indexed videos still expose their
+children. Opening a different folder clears filters and selection after saving the
+current workbench; a failed save prevents navigation. Search does not remove folder
+navigation. Drafts/Ready/Posted and other workflow queues intentionally retain their
+archive-wide scope, explicitly labeled in the UI; their sidebar counts include copies.
+
+**Duplicate handling is presentation-only.** Only non-empty Dropbox files with a
+valid matching content hash and size are grouped. The grid groups after applying
+folder/search/status filters, so a copy remains available in every folder where it
+exists. The shorter filename is the stable representative (lowest ID breaks ties).
+The `exact copies · View` button opens an accessible native dialog listing every
+record/location, including copies outside current filters, with an Open action.
+Unchecking `Group exact copies` restores individual cards. Notes, captions, approvals,
+descriptions, originals and database IDs are never merged or deleted. The raw/agent
+APIs continue returning separate records. Similar previews, different edits/encodings,
+local/unhashed media and empty files are not automatically grouped.
+
+Implementation: `frontend/src/folders.ts` builds memoized folder/copy indexes;
+`FolderNavigation.tsx` renders folder tiles, sidebar and breadcrumbs;
+`DuplicateCopiesDialog.tsx` exposes individual copies; `App.tsx` integrates these
+with filtering, selection, autosave and the existing workbench. A read-only,
+owner-authenticated `GET /api/reels/library` returns a lightweight unfiltered
+identity index without captions/notes or cloud downloads. `ReelResponse` now includes
+`content_hash`, matching the existing database and versioned API identity fields.
+No database migration or new dependency was necessary.
+
+Live catalog verification: 1,278 records; 39 non-empty exact-copy groups containing
+42 additional copies across the archive. Three zero-byte records (IDs 14, 16, 17)
+were excluded from grouping. Home has 1,039 files → **1,032 unique cards**, with all
+239 subfolder files excluded. `artistic/tv` has 23 files → 20 cards. IDs 1204/1205/1206
+share one card represented by `Number.mp4` (1205), while the distinct 46-minute
+video (1207) stays separate. Cross-folder pairs 1161/1162 and 1202/1203 retain their
+respective folder memberships and appear in each other's copy list.
+
+Verification: **68 backend tests passed locally and in the deployed Linux image;
+11 frontend unit tests, production build, ESLint and whitespace checks passed.**
+Read-only private HTTPS checks used the actual deployed catalog with the frontend's
+folder/grouping functions, confirmed the new asset bundle, checked anonymous index
+denial (401), and confirmed Dropbox connected/Gemini configured. These are API/logic
+checks, not rendered browser proof: browser automation was denied because its
+admin-policy verification was unavailable. No bypass or alternate browser driver
+was used. See the latest section of `VM_TEST_RESULTS.md` for remaining visual checks.
+
+The prior VM image is retained as `reelvault:vmtest-before-folder-browser`; only the
+named ReelVault container was restarted. The same owner token remains valid, but
+in-memory browser sessions expire on restart. The Tailscale endpoint and all private
+storage/auth/cache configuration are unchanged. At verification, 1,269 descriptions
+were present; no additional Gemini requests were explicitly triggered by these checks.
+
+Known limits: navigation currently represents **indexed video folders**, not empty
+or image-only directories. There is no visual/perceptual duplicate detector and no
+physical storage cleanup in this change. Browser-rendered acceptance remains pending.
+The branch remains uncommitted and unpushed.
+
+# September 5, 2026 — Tailscale-only access and description recovery
+
+The selected deployment is now **private Tailscale HTTPS, not Vercel or public hosting**:
+`https://cmac-bolt-data-vm.tail8e0a20.ts.net:8443/`. Persistent Tailscale Serve proxies
+to VM loopback `127.0.0.1:18765`; Funnel is not enabled and the existing public-port
+services were not changed. Tailscale must be connected on the viewing device, but
+the Mac and its SSH tunnel no longer need to be running. Existing tailnet ACLs apply.
+`PUBLIC_ORIGIN` is the exact private HTTPS origin; cookies are Secure/HttpOnly/Strict.
+Owner and agent tokens are unchanged. The old HTTP localhost address is no longer
+the browser login URL. See [VM_DEPLOYMENT.md](VM_DEPLOYMENT.md) for current operations.
+
+The missing quick descriptions were a catalog-migration gap, not lost Gemini work.
+The old Mac catalog has 1,405 descriptions and 1,411 thumbnail references across
+1,626 records; six summary jobs had failed and 212 were waiting for local previews.
+Dropbox indexing created independent VM records with different IDs. The new
+`deploy/export_mac_descriptions.py` and `backend/app/catalog_import.py` safely
+reconcile root-relative paths, sizes and source modification times; verify content
+hashes for already-resident files; skip uncertain matches; and import only derived
+descriptions/thumbnails with destination revision guards and a pre-import SQLite backup.
+
+Recovery added **1,031 descriptions and 1,037 thumbnails**, preserving 128 existing
+matched VM descriptions and all VM editorial/provider fields. After import there
+were **1,165 described of 1,278 reels**, 111 queued and two failed. Gemini was paused
+during reconciliation, then resumed for remaining missing descriptions under the
+existing $1/day quick-summary estimate limit. No paid AI calls were needed for the
+import itself. The Mac database and all original videos were left unchanged.
+The two failed jobs (VM IDs 1213 and 1257) received empty Gemini responses after
+three attempts; they remain flagged rather than being assigned invented descriptions.
+Original Mac captions, notes, approvals, full AI analyses and usage history were not
+copied; their reconciliation remains a separate editorial migration.
+
+Backup: VM `data/backups/reelvault-before-mac-descriptions-20260906T031545765358Z.db`.
+The approximately 57 MB manifest/thumbnail bundle is in `data/imports/mac-20260906/`,
+outside Git. All 65 backend tests passed locally and in the VM image. Live HTTPS
+API checks verified owner login, Secure cookies, denied foreign origins, three
+restored summary/thumbnail samples, all highlighted screenshot IDs, private thumbnail
+protection after logout and agent range downloads. Browser-rendered follow-up checks
+were blocked by the browser tool's unavailable admin-policy check; no bypass was used.
+
+The earlier notes below describe the preceding implementation/testing stages and
+are superseded by this section wherever access URLs or migration status differ.
+
+# September 5, 2026 — Earlier `vmtest` hosted Dropbox edition
+
+This is now a **single-owner VM test build**, not yet a publicly exposed production
+service. The React dashboard is served by FastAPI, with a separate agent token and
+browser login. The VM test catalog is separate from the existing Mac archive.
+Read [VM_DEPLOYMENT.md](VM_DEPLOYMENT.md) for deployment and the one-time Dropbox
+setup, and [AGENT_API.md](AGENT_API.md) for the exact agent contract. These sections
+supersede storage/auth/deployment claims in the older historical reviews below.
+
+## What changed and where
+
+| Area | Files | Responsibility |
+|---|---|---|
+| Configuration | `backend/app/settings.py`, `.env.example`, `deploy/bootstrap.py` | Local/Dropbox modes, resource limits, private deployment configuration |
+| Authentication | `backend/app/auth.py`, `frontend/src/AuthGate.tsx` | Owner browser sessions, separate restricted agent token, origin checks, login throttling |
+| Dropbox | `backend/app/dropbox_storage.py` | Read-only PKCE/offline OAuth, team root namespace, recursive incremental metadata scans, exact-revision downloads |
+| Cache | `backend/app/media_cache.py` | Exclusive process owner, five transfers, reservations, pins, LRU/TTL, byte count and content-hash verification |
+| Durable jobs | `backend/app/jobs.py` | SQLite queue; five materialization workers, separate serial heavy-work worker and scan worker; restart recovery |
+| Agent API | `backend/app/routes/v1.py`, `AGENT_API.md` | Keyset-paginated discovery, downloads/jobs, per-platform/account publication claims and receipts |
+| Database | `backend/app/database.py` | Additive schema v2; provider IDs/revisions, transfer jobs, cache ledger, publication attempts; backup before populated migration |
+| Integration | `archive.py`, `quick_summary.py`, `routes/reels.py`, `gemini_service.py`, `main.py` | Existing UI/editor/AI workflows use managed media; built frontend serving; source-version checks on analysis results |
+| VM UI | `frontend/src/StoragePanel.tsx`, `api.ts`, `App.tsx` | Connection wizard, disk/cache status, persisted job results, polling instead of long UI-owned requests |
+| Packaging | `Dockerfile`, `.dockerignore`, `backend/requirements-vm.txt`, `deploy/run-vmtest.sh` | Non-root isolated container; loopback port; persistent data; resource/log limits |
+| Verification | `backend/tests/test_vm.py`, `frontend/tests/vm-smoke.mjs`, `deploy/seed_qa.py` | Cache/auth/sync/claims tests and actual browser verification using isolated synthetic media |
+
+## Data flow and invariants
+
+Mac downloads → Dropbox desktop upload → Dropbox cloud metadata → VM SQLite catalog.
+Only explicit playback/download/processing fetches an original into the VM cache.
+Scanning never downloads the entire archive. Quick descriptions in Dropbox mode
+**can** download selected/queued videos through the bounded cache. The current VM's
+automatic quick summaries are enabled with the existing $1/day application estimate
+limit; fresh bootstrap environments start disabled until credentials are configured.
+Local/iCloud mode retains its no-auto-hydration behavior.
+
+- Default VM media policy: five downloads, 5 GB total reserved media, 12-hour idle
+  expiration, 5 GB minimum free disk. Thumbnails/database/container images are not
+  part of that media budget; overall free-disk checks remain necessary.
+- Cache eviction never deletes originals. Responses and processing pin their cached
+  files until finished; partial files are not served. No direct unleased cache paths
+  are handed to agents.
+- Dropbox file ID—not pathname—is identity. Moves retain editorial data. Replacing
+  contents invalidates derived previews and approval for the new revision; manual
+  text and historical full analysis are retained. Local records still use paths.
+- Page failures never advance the Dropbox cursor or mark unseen files missing.
+- All hosted APIs, thumbnails and docs require authentication, except minimal
+  liveness/login/session checks. Agent scope does not include self-approval, Dropbox
+  setup, paid analysis, or legacy mutations. Tokens never go in browser storage.
+- Posting is **not implemented against any social platform**. Claims preserve a
+  caption/revision snapshot and prevent a second active/completed attempt for a
+  reel/platform/account. Ambiguous started attempts become uncertain and require
+  external reconciliation. This cannot promise exactly-once external delivery.
+- One Uvicorn process owns each cache/database. Threads provide internal concurrency;
+  multiple worker processes/replicas sharing this SQLite directory are unsupported.
+- Submitted full-analysis jobs survive browser closure. A browser selection list
+  not yet submitted still requires that tab; interrupted paid AI jobs need manual review.
+
+## Current stage and remaining acceptance
+
+Core hosted implementation, container packaging, and automated VM-specific tests are
+present. Owner credentials are generated privately outside Git. The test listener is
+loopback-only and accessed over SSH; public DNS/HTTPS/ingress is deliberately not set up.
+The new frontend tooling dependency audit is clean after compatible security updates.
+Verification: 58 backend tests passed locally and in the VM image after the live
+Dropbox revision-download and loopback-origin fixes. The initial build/lint, synthetic playback and restart
+checks are recorded in [VM_TEST_RESULTS.md](VM_TEST_RESULTS.md); the real-account
+acceptance below supersedes that initial report's pending-authorization status.
+
+The selected Dropbox archive is `/Cody Viveiros/SnapTik_Reel_Archive`, corresponding
+to the user's `Dropbox-CMACRoofing` Mac folder. OAuth is now connected. Live acceptance
+on September 5 CDT (September 6 UTC) verified 1,278 indexed records and incremental
+discovery of additional uploads. Five real downloads totaling 56,199,816 bytes ran
+concurrently (observed peak five), passed content-hash checks, and completed in about
+5.2 seconds. All five authenticated range-download requests returned the expected bytes.
+
+The live API rejected the deprecated separate `rev` download argument with HTTP 400.
+The adapter now sends `path: "rev:<revision>"`, still validating the returned file ID
+and revision before accepting bytes. Regression tests cover the current wire format
+and rejection of a wrong file/revision. The fix is deployed on the VM.
+
+Real Chrome checks (1440×1000) passed owner login, connected storage UI, search,
+12.6-second reel playback, restricted-agent range download, no browse-time media
+preload, and zero console/page errors. A separate 1.2 GB, 46-minute archive video
+exceeded the initial 30-second cold-playback test wait; it played correctly after
+caching. Cold playback currently waits for the complete verified download, so large
+files have startup latency. Do not describe this as streaming directly from Dropbox.
+After testing: six cached files, 1.256 GB of the 5 GB media limit, approximately
+20.69 GB free disk, no active transfers or reader pins. Old failed test jobs remain
+in history; new requests succeeded. No Dropbox originals or editorial fields were changed.
+
+The original Mac database was read only for an aggregate check: 1,626 catalog
+records, three final captions, one record with notes. No original files, editorial
+data, credentials, or database were copied into the VM test catalog. Historical
+catalog relinking is not automatic and remains a separately reviewed migration.
+Gemini was initially left unconfigured during deployment testing; this was corrected
+on September 5 CDT using the existing Mac project's key, transferred privately into
+the VM's 0600 environment file. Full AI uses `gemini-2.5-flash`; automatic visual quick
+summaries use `gemini-2.5-flash-lite`. A real reel description succeeded (904 input,
+56 output tokens; $0.0001128 application estimate) before automatic queueing was
+enabled. The $1/day quick-summary estimate guard is unchanged, and is not a provider
+billing cap or a budget for user-triggered full-video analyses.
+
+The owner's `localhost:18765` tab revealed an overly strict origin comparison against
+`127.0.0.1:18765`. The guard now allows only equivalent loopback hostnames at the
+configured scheme/port. Null/unrelated origins, other ports/schemes, and arbitrary
+Host/forwarded-host headers cannot expand that list. Public HTTPS configurations
+continue to use one exact origin. Live owner login requests succeed for both local
+addresses, with the existing token unchanged. Browser sessions expire on restart.
+Rendered follow-up verification was blocked by the browser tool's unavailable
+admin-policy check; no alternate-browser bypass was attempted. Earlier rendered
+checks above remain historical evidence, not proof of this follow-up browser run.
+
+Remaining production work includes a domain/TLS decision, credential rotation,
+scheduled off-VM backups, sustained real-account load testing, dependency update
+policy, and any historical catalog migration. This is intentionally a personal-use
+beta, not multi-tenant SaaS or a complete social scheduler.
+
+---
+
+# September 4, 2026 archive upgrade — historical local-mode behavior
 
 Read [README.md](README.md) for operation and [ARCHIVE_DESIGN.md](ARCHIVE_DESIGN.md) for the review, storage recommendation, pricing, and limitations. The August review below is retained as a historical baseline and no longer describes all current behavior.
 

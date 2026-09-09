@@ -2,6 +2,11 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 from .database import get_db_connection
 
+# One eligibility rule for the dashboard, counts, legacy queue and agent API.
+READY_REEL_PREDICATE = """status='ready' AND approved=1
+    AND length(trim(COALESCE(final_post_text,''),char(9)||char(10)||char(13)||' '))>0
+    AND storage_status != 'missing'"""
+
 def dict_from_row(row) -> Dict[str, Any]:
     if row is None:
         return None
@@ -48,13 +53,15 @@ def get_all_reels(
             else:
                 query += " AND (ai_summary IS NULL OR ai_summary = '')"
                 
-        if availability:
+        if availability == 'present':
+            query += " AND storage_status != 'missing'"
+        elif availability:
             query += " AND storage_status = ?"
             params.append(availability)
         if has_quick_summary is not None:
             query += " AND COALESCE(quick_summary, '') " + ("!= ''" if has_quick_summary else "= ''")
         if status == 'ready':
-            query += " AND approved = 1 AND length(trim(COALESCE(final_post_text, ''), char(9)||char(10)||char(13)||' ')) > 0 AND storage_status != 'missing'"
+            query += " AND " + READY_REEL_PREDICATE
         # Order by discovered_at descending
         query += " ORDER BY discovered_at DESC, id DESC"
         
@@ -227,13 +234,9 @@ def get_ready_queue() -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """
+            f"""
             SELECT * FROM reels 
-            WHERE status = 'ready' 
-              AND approved = 1 
-              AND final_post_text IS NOT NULL 
-              AND length(trim(final_post_text, char(9)||char(10)||char(13)||' ')) > 0
-              AND storage_status != 'missing'
+            WHERE {READY_REEL_PREDICATE}
             ORDER BY updated_at ASC
             """
         )
@@ -243,7 +246,7 @@ def get_ready_queue() -> List[Dict[str, Any]]:
 def get_status_counts() -> Dict[str, int]:
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT status, COUNT(*) as count FROM reels GROUP BY status")
+        cursor.execute("SELECT status, COUNT(*) as count FROM reels WHERE storage_status != 'missing' GROUP BY status")
         rows = cursor.fetchall()
         
         counts = {
@@ -264,9 +267,7 @@ def get_status_counts() -> Dict[str, int]:
             total += count
             
         counts["all"] = total
-        counts["ready"] = conn.execute("""SELECT COUNT(*) FROM reels WHERE status='ready' AND approved=1
-            AND length(trim(COALESCE(final_post_text,''),char(9)||char(10)||char(13)||' '))>0
-            AND storage_status != 'missing'""").fetchone()[0]
+        counts["ready"] = conn.execute(f"SELECT COUNT(*) FROM reels WHERE {READY_REEL_PREDICATE}").fetchone()[0]
         return counts
 
 

@@ -32,6 +32,10 @@ data/reelvault.db-*
 data/thumbnails/
 data/backups/
 data/*.lock
+data/cache/
+data/secrets/
+data/imports/
+.vmtest/
 reels/*
 !reels/.gitkeep
 

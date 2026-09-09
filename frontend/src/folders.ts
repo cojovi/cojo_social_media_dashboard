@@ -1,98 +1,118 @@
-import type { Reel } from './api';
+import type { LibraryItem } from './api';
 
 export interface FolderNode {
   name: string;
   path: string;
+  /** Unique exact-copy groups directly in this folder, not descendants. */
   count: number;
+  fileCount: number;
   children: FolderNode[];
 }
 
-/** Relative folder path inside the reels root (empty string = file at root). */
-export function getRelativeFolder(filepath: string, reelsRoot: string): string {
-  const normalizedRoot = reelsRoot.normalize('NFC').replace(/\/+$/, '');
-  filepath = filepath.normalize('NFC');
-  if (normalizedRoot && !filepath.startsWith(normalizedRoot + '/')) return 'Previous source';
-  let rel = filepath;
-  if (normalizedRoot && filepath.startsWith(normalizedRoot + '/')) {
-    rel = filepath.slice(normalizedRoot.length).replace(/^\/+/, '');
-  }
-  const lastSlash = rel.lastIndexOf('/');
-  return lastSlash === -1 ? '' : rel.slice(0, lastSlash);
+/** Dropbox paths are case-insensitive; local paths are not assumed to be. */
+export function folderKey(path: string, reelsRoot: string): string {
+  const normalized = path.normalize('NFC').replace(/\/+$/, '');
+  return reelsRoot.startsWith('dropbox:') ? normalized.toLowerCase() : normalized;
 }
 
-export function buildFolderTree(reels: Reel[], reelsRoot: string): FolderNode[] {
-  const directCounts = new Map<string, number>();
+/** Relative folder inside the configured source (empty string = source root). */
+export function getRelativeFolder(filepath: string, reelsRoot: string): string {
+  const root = reelsRoot.normalize('NFC').replace(/\/+$/, '');
+  const file = filepath.normalize('NFC');
+  if (root && !folderKey(file, root).startsWith(folderKey(root, root) + '/')) return 'Previous source';
+  const relative = root ? file.slice(root.length + 1) : file;
+  const lastSlash = relative.lastIndexOf('/');
+  return lastSlash === -1 ? '' : relative.slice(0, lastSlash);
+}
 
-  for (const reel of reels) {
-    const folder = getRelativeFolder(reel.filepath, reelsRoot);
-    directCounts.set(folder, (directCounts.get(folder) || 0) + 1);
+/** Only provider content hashes prove identical bytes; names/previews do not. */
+export function exactCopyKey(reel: Pick<LibraryItem, 'id' | 'storage_provider' | 'content_hash' | 'file_size'>): string {
+  if (reel.storage_provider === 'dropbox' && /^[a-f\d]{64}$/i.test(reel.content_hash || '') && reel.file_size > 0) {
+    return `dropbox:${reel.content_hash!.toLowerCase()}:${reel.file_size}`;
   }
+  return `record:${reel.id}`;
+}
 
-  const nodeMap = new Map<string, FolderNode>();
+export function indexCopies<T extends LibraryItem>(reels: T[]): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const reel of reels) {
+    const key = exactCopyKey(reel);
+    const group = groups.get(key);
+    if (group) group.push(reel);
+    else groups.set(key, [reel]);
+  }
+  return groups;
+}
 
-  const ensureNode = (path: string, name: string): FolderNode => {
-    const existing = nodeMap.get(path);
+/** Preserve query order and folder membership. Every underlying ID stays intact. */
+export function groupExactCopies<T extends LibraryItem>(reels: T[]): T[] {
+  return [...indexCopies(reels).values()].map(group => group.reduce((best, reel) => {
+    // Prefer the concise original name over "copy 2", with a stable ID tie-break.
+    return reel.filename.length < best.filename.length ||
+      (reel.filename.length === best.filename.length && reel.id < best.id) ? reel : best;
+  }));
+}
+
+/** Direct children only, never a recursive view. */
+export function filterReelsByFolder<T extends LibraryItem>(reels: T[], reelsRoot: string, folderPath: string): T[] {
+  const selected = folderKey(folderPath, reelsRoot);
+  return reels.filter(reel => folderKey(getRelativeFolder(reel.filepath, reelsRoot), reelsRoot) === selected);
+}
+
+/** One catalog pass builds stable navigation even while the grid is filtered. */
+export function buildLibraryIndex(reels: LibraryItem[], reelsRoot: string, includeMissing = false) {
+  // Missing paths are history, not current folder membership or available copies.
+  const members = includeMissing ? reels : reels.filter(reel => reel.storage_status !== 'missing');
+  const nodes = new Map<string, FolderNode>();
+  const identities = new Map<string, Set<string>>();
+  const ensure = (path: string): FolderNode => {
+    const key = folderKey(path, reelsRoot);
+    const existing = nodes.get(key);
     if (existing) return existing;
     const node: FolderNode = {
-      name,
-      path,
-      count: 0,
-      children: [],
+      name: path.split('/').pop() || reelsRoot.replace(/\/+$/, '').split('/').pop() || 'Library',
+      path, count: 0, fileCount: 0, children: [],
     };
-    nodeMap.set(path, node);
+    nodes.set(key, node);
+    if (path) {
+      const slash = path.lastIndexOf('/');
+      ensure(slash < 0 ? '' : path.slice(0, slash)).children.push(node);
+    }
     return node;
   };
-
-  ensureNode('', 'Root');
-
-  for (const [folderPath, count] of directCounts) {
-    if (folderPath === '') {
-      nodeMap.get('')!.count = count;
-      continue;
-    }
-
-    const parts = folderPath.split('/');
-    let currentPath = '';
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      const parentPath = currentPath;
-      currentPath = currentPath ? `${currentPath}/${part}` : part;
-      const node = ensureNode(currentPath, part);
-      if (i === parts.length - 1) {
-        node.count = count;
-      }
-      if (parentPath !== currentPath) {
-        const parent = ensureNode(parentPath, parentPath === '' ? 'Root' : parentPath.split('/').pop()!);
-        if (!parent.children.some(c => c.path === node.path)) {
-          parent.children.push(node);
-        }
-      }
-    }
+  const root = ensure('');
+  for (const reel of members) {
+    const path = getRelativeFolder(reel.filepath, reelsRoot);
+    const node = ensure(path);
+    node.fileCount++;
+    const key = folderKey(path, reelsRoot);
+    let seen = identities.get(key);
+    if (!seen) { seen = new Set(); identities.set(key, seen); }
+    seen.add(exactCopyKey(reel));
+    node.count = seen.size;
   }
-
-  const sortNodes = (nodes: FolderNode[]) => {
-    nodes.sort((a, b) => a.name.localeCompare(b.name));
-    nodes.forEach(n => sortNodes(n.children));
-  };
-
-  const root = nodeMap.get('')!;
-  sortNodes(root.children);
-  return root.children;
+  for (const node of nodes.values()) node.children.sort((a, b) => a.name.localeCompare(b.name));
+  // The Dropbox source wraps the old Mac root by one level. Generic roots work too.
+  const home = root.name.toLowerCase() === 'snapigtik download' ? root :
+    root.children.find(node => node.name.toLowerCase() === 'snapigtik download') || root;
+  return { root, home, nodes, copies: indexCopies(members) };
 }
 
-/** Match reels in the selected folder and all nested subfolders. */
-export function filterReelsByFolder(reels: Reel[], reelsRoot: string, folderPath: string | null): Reel[] {
-  if (folderPath === null) return reels;
+export type LibraryIndex = ReturnType<typeof buildLibraryIndex>;
 
-  return reels.filter(reel => {
-    const folder = getRelativeFolder(reel.filepath, reelsRoot);
-    if (folderPath === '') {
-      return folder === '';
-    }
-    return folder === folderPath || folder.startsWith(`${folderPath}/`);
-  });
-}
-
-export function countReelsInFolder(reels: Reel[], reelsRoot: string, folderPath: string | null): number {
-  return filterReelsByFolder(reels, reelsRoot, folderPath).length;
+export function folderBreadcrumbs(library: LibraryIndex, path: string, reelsRoot: string): FolderNode[] {
+  const selected = folderKey(path, reelsRoot);
+  const homeKey = folderKey(library.home.path, reelsRoot);
+  const inHome = !homeKey || selected === homeKey || selected.startsWith(homeKey + '/');
+  const start = inHome ? library.home : library.root;
+  const result = [start];
+  let current = start.path;
+  const rest = path.slice(current ? current.length + 1 : 0);
+  if (selected === folderKey(current, reelsRoot)) return result;
+  for (const part of rest.split('/').filter(Boolean)) {
+    current = current ? `${current}/${part}` : part;
+    const node = library.nodes.get(folderKey(current, reelsRoot));
+    if (node) result.push(node);
+  }
+  return result;
 }

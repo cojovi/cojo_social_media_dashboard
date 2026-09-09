@@ -29,11 +29,11 @@ export function ArchivePanel({ status, onRefresh, onToast, onScan }: Props) {
       </div>
       <p className="text-sm text-purple-200 leading-relaxed">
         {status.auto_scan ? `Scans at startup and every ${Math.round(status.scan_interval_seconds / 60)} minutes.` : 'Automatic scanning is off.'}
-        {' '}Browsing uses cached images. Videos download when you choose to play or fully analyze them.
+        {' '}Browsing uses cached images. Videos download when you choose to play, download or process them.
       </p>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-        {[[status.described, 'Described'], [status.storage.local || 0, 'On this Mac'],
-          [status.storage.cloud || 0, 'Offloaded'], [status.storage.missing || 0, 'Missing / moved']].map(([value, label]) => (
+        {[[status.described, 'Described'], [status.storage.local || 0, 'Local sources'],
+          [status.storage.cloud || 0, status.storage_provider === 'dropbox' ? 'In Dropbox' : 'Offloaded'], [status.storage.missing || 0, 'Missing / moved']].map(([value, label]) => (
           <div key={label} className="rounded-lg bg-plum-950 p-3 border border-plum-800">
             <p className="text-white text-xl font-semibold">{value}</p><p className="text-xs text-purple-400">{label}</p>
           </div>
@@ -48,6 +48,7 @@ export function ArchivePanel({ status, onRefresh, onToast, onScan }: Props) {
         <h4 className="text-sm font-semibold text-white">Quick descriptions · {status.paused ? 'Paused' : status.blocked_reason ? 'Waiting' : 'Active'}</h4>
         <p className="text-xs text-purple-300 leading-relaxed">
           Three small frames from local videos, or one existing thumbnail for offloaded videos. Rough visual labels only; no audio review.
+          {status.storage_provider === 'dropbox' && ' Queued Dropbox videos are downloaded through the bounded cache for frame sampling.'}
           {' '}{status.auto_quick_summary ? 'New discoveries join this queue automatically.' : 'Automatic descriptions are off; use the queue button below.'}
         </p>
         <p className="text-xs text-purple-400 break-all">{status.quick_model}</p>

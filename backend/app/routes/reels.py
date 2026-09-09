@@ -2,13 +2,21 @@ from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
-from ..schemas import ReelResponse, ReelUpdate, ScanResponse, StatusCountsResponse, ThumbnailBackfillResponse
+from ..schemas import ReelResponse, ReelUpdate, ScanResponse, StatusCountsResponse, ThumbnailBackfillResponse, LibraryItemResponse
 from .. import models
 from ..scanner import backfill_thumbnails
 from ..archive import run_scan
 from ..thumbnails import ensure_thumbnail_for_video
 from ..icloud import ensure_icloud_downloaded
 from ..gemini_service import analyze_video_with_gemini, GeminiServiceError
+from ..media_cache import local_media, cache
+from ..database import get_db_connection
+from ..dropbox_storage import StorageError
+import mimetypes
+import threading
+
+analysis_lock = threading.Lock()
+thumbnail_lock = threading.BoundedSemaphore(2)
 
 router = APIRouter(prefix="/reels", tags=["reels"])
 
@@ -28,7 +36,8 @@ def trigger_scan():
             "added_count": stats["added"],
             "updated_count": stats["updated"],
             "missing_count": stats["missing"],
-            "skipped_count": stats["skipped"]
+            "skipped_count": stats["skipped"],
+            "moved_count": stats.get("moved", 0),
         }
     except HTTPException:
         raise
@@ -45,6 +54,19 @@ def get_reels_stats():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {e}")
 
+@router.get("/library", response_model=List[LibraryItemResponse])
+def get_library_index():
+    """Stable navigation and exact-copy identities, independent of grid filters.
+
+    Metadata only: no cloud downloads, Gemini requests, or catalog mutations.
+    Owner authentication is enforced by the same middleware as the legacy API.
+    """
+    with get_db_connection() as conn:
+        rows = conn.execute("""SELECT id,filename,filepath,file_size,storage_provider,
+            content_hash,status,storage_status FROM reels ORDER BY id""").fetchall()
+    return [dict(row) for row in rows]
+
+
 @router.get("", response_model=List[ReelResponse])
 def get_reels(
     status: Optional[str] = Query(None, description="Filter by status (draft, ready, etc.)"),
@@ -52,7 +74,7 @@ def get_reels(
     search: Optional[str] = Query(None, description="Search term in filename/captions/hashtags"),
     has_final_post: Optional[bool] = Query(None, description="Filter by final caption presence"),
     has_ai_summary: Optional[bool] = Query(None, description="Filter by full AI analysis completion"),
-    availability: Optional[str] = Query(None, pattern="^(local|cloud|missing|unknown)$"),
+    availability: str = Query('present', pattern="^(present|local|cloud|missing|unknown)$"),
     has_quick_summary: Optional[bool] = None
 ):
     """
@@ -102,14 +124,17 @@ def generate_single_thumbnail(reel_id: int):
     if not reel:
         raise HTTPException(status_code=404, detail="Reel not found.")
 
-    thumb_path = ensure_thumbnail_for_video(reel["filepath"])
+    with thumbnail_lock, local_media(reel) as path:
+        thumb_path = ensure_thumbnail_for_video(str(path))
     if not thumb_path:
         raise HTTPException(
             status_code=400,
             detail="Could not generate thumbnail. File may still be in iCloud — try Quick Look first.",
         )
 
-    models.update_reel(reel_id, {"thumbnail_path": Path(thumb_path).name})
+    with get_db_connection() as conn:
+        conn.execute("UPDATE reels SET thumbnail_path=? WHERE id=? AND source_version IS ?", (Path(thumb_path).name, reel_id, reel['source_version']))
+        conn.commit()
     return models.get_reel_by_id(reel_id)
 
 @router.get("/{reel_id}/video")
@@ -118,10 +143,33 @@ def stream_reel_video(reel_id: int):
     Streams the local video file for standard HTML5 playback.
     Handles Byte-Ranges for media seeking automatically.
     """
+    return video_response(reel_id)
+
+
+class PinnedFileResponse(FileResponse):
+    def __init__(self, path, key, **kwargs):
+        super().__init__(path, **kwargs)
+        self.cache_key = key
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if self.cache_key:
+                cache.release(self.cache_key)
+
+
+def video_response(reel_id, attachment=False, expected_version=None):
     reel = models.get_reel_by_id(reel_id)
     if not reel:
         raise HTTPException(status_code=404, detail="Reel not found.")
+    if expected_version is not None and reel['source_version'] != expected_version:
+        raise HTTPException(409, 'Source revision changed; do not publish a different file')
     
+    if reel.get('storage_provider') == 'dropbox':
+        filepath, key = cache.acquire(reel)
+        return PinnedFileResponse(filepath, key, media_type=mimetypes.guess_type(reel['filename'])[0] or 'application/octet-stream',
+                                  filename=reel['filename'], content_disposition_type='attachment' if attachment else 'inline')
     filepath = reel["filepath"]
     from ..icloud import storage_status
     if storage_status(filepath) == 'missing':
@@ -129,7 +177,7 @@ def stream_reel_video(reel_id: int):
     if not ensure_icloud_downloaded(filepath, timeout=60):
         raise HTTPException(status_code=503, detail="Cloud download is not ready. Download the video in Finder and try again.")
         
-    return FileResponse(filepath)
+    return FileResponse(filepath, filename=reel['filename'], content_disposition_type='attachment' if attachment else 'inline')
 
 @router.patch("/{reel_id}", response_model=ReelResponse)
 def update_reel_fields(reel_id: int, payload: ReelUpdate):
@@ -167,13 +215,8 @@ def run_ai_analysis(reel_id: int):
         raise HTTPException(status_code=404, detail="Reel not found.")
         
     try:
-        if not ensure_icloud_downloaded(reel["filepath"], timeout=120.0):
-            raise HTTPException(
-                status_code=400,
-                detail="Video is not available locally yet. Open Quick Look first or wait for iCloud to download.",
-            )
-
-        analysis = analyze_video_with_gemini(reel["filepath"], reel_id=reel_id)
+        with analysis_lock, local_media(reel) as path:
+            analysis = analyze_video_with_gemini(str(path), reel_id=reel_id, mime_type=mimetypes.guess_type(reel['filename'])[0])
         
         # Format tags as string if list is returned
         tags_list = analysis.get("hashtags", [])
@@ -189,7 +232,12 @@ def run_ai_analysis(reel_id: int):
             "ai_last_analyzed_at": datetime.now().isoformat()
         }
         
-        models.update_reel(reel_id, update_data)
+        with get_db_connection() as conn:
+            columns = ','.join(f'{key}=?' for key in update_data)
+            result = conn.execute(f'UPDATE reels SET {columns} WHERE id=? AND source_version IS ?', (*update_data.values(), reel_id, reel['source_version']))
+            conn.commit()
+            if not result.rowcount:
+                raise HTTPException(409, 'Source changed during analysis; suggestions were not applied')
         return models.get_reel_by_id(reel_id)
         
     except HTTPException:

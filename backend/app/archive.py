@@ -58,7 +58,11 @@ def run_scan():
         return None
     set_state('scan', {'running': True, 'started_at': now(), 'error': None})
     try:
-        result = scan_reels_folder()
+        if settings.STORAGE_PROVIDER == 'dropbox':
+            from .dropbox_storage import sync_dropbox
+            result = sync_dropbox()
+        else:
+            result = scan_reels_folder()
         if settings.AUTO_QUICK_SUMMARY:
             enqueue_missing()
         set_state('scan', {'running': False, 'finished_at': now(), 'error': None, **result})
@@ -82,7 +86,7 @@ def status():
     reserve = quick_request_reserve()
     blocked = (not settings.is_gemini_enabled or reserve is None or
                usage['quick_today_usd'] + reserve > settings.QUICK_SUMMARY_DAILY_BUDGET_USD)
-    return dict(scan=get_state('scan', {}), scan_interval_seconds=settings.SCAN_INTERVAL_SECONDS,
+    return dict(storage_provider=settings.STORAGE_PROVIDER, scan=get_state('scan', {}), scan_interval_seconds=settings.SCAN_INTERVAL_SECONDS,
         auto_scan=settings.AUTO_SCAN, auto_quick_summary=settings.AUTO_QUICK_SUMMARY,
         quick_model=settings.QUICK_SUMMARY_MODEL, paused=get_state('paused', False),
         blocked_reason='Configure Gemini and a priced quick model, or increase the daily estimate limit.' if blocked else None,
@@ -182,7 +186,11 @@ class ArchiveWorker:
     def scan_loop(self):
         while not self.stop_event.is_set():
             try:
-                run_scan()
+                from .dropbox_storage import dropbox
+                if settings.STORAGE_PROVIDER != 'dropbox' or dropbox.status()['connected']:
+                    run_scan()
+                else:
+                    set_state('scan', {'running': False, 'error': None, 'waiting_for': 'dropbox_connection'})
             except Exception:
                 logger.exception('Automatic scan failed')
             self.stop_event.wait(settings.SCAN_INTERVAL_SECONDS)
