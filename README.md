@@ -1,85 +1,176 @@
-# ReelVault
+<!-- COJOVI / SIGNAL — ReelVault project edition. Commit with readme-assets/. -->
+<a name="top"></a>
 
-A local video archive for finding something worth posting, drafting its caption, and maintaining an approved social queue. React/Vite, FastAPI, SQLite, and a Python CLI share the same catalog. Source videos stay in their existing folders; thumbnails, descriptions, notes, and captions stay on the local SSD.
+<p align="center">
+  <img src="readme-assets/banner.svg" alt="ReelVault — discover footage, shape the caption, approve the queue." width="100%">
+</p>
 
-## Daily workflow
+<h1 align="center">ReelVault</h1>
 
-1. Add videos anywhere under `REELS_FOLDER`, including subfolders.
-2. Start `./start.sh`. The backend scans at startup and every fifteen minutes while it runs. The dashboard refreshes every ten seconds; **Rescan Folder** also works immediately.
-3. Stable new files are indexed and queued for **quick descriptions** automatically, along with the existing undescribed backlog. Empty files and files modified in the last 60 seconds wait for a later scan.
-4. Search by subject, quick tags, description, filename, caption, or notes. Filter by folder and local/offloaded/missing status. The grid initially renders 60 cards; **Show 60 more** expands it.
-5. Play a promising video using Quick Look, or open its workbench and press Play. Editing and hovering do not preload the video.
-6. Request **Full video review + captions** when you need audio/context and posting suggestions. Write or adopt a final caption and mark it ready.
+<p align="center">
+  <strong>Find the clip. Shape the story. Keep the final say.</strong><br>
+  A local video archive and caption workbench, with optional Gemini assistance and an approved-content queue.
+</p>
 
-Only `ready` + `approved` + nonblank final caption + source not marked missing enters the ready queue. Nothing publishes to social platforms automatically.
+<p align="center">
+  <img src="readme-assets/stack.svg" alt="React + Vite · FastAPI · SQLite · Gemini" width="640">
+</p>
 
-## Two different AI workflows
+<p align="center">
+  <a href="#overview">Overview</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#usage">Workflow</a> ·
+  <a href="#security">Security</a>
+</p>
 
-| Workflow | Input | Default model | Purpose |
-|---|---|---|---|
-| Quick description | Three 384px stills from a local video; one cached thumbnail if offloaded | `gemini-2.5-flash-lite` | One rough sentence, category, search tags; no audio |
-| Full review | Original video and audio uploaded through Gemini Files API | `gemini-2.5-flash` | Detailed summary, caption, hashtags, platform and review notes |
+---
 
-Quick descriptions are stored in separate `quick_*` fields and never modify your draft, final caption, approval, or full AI suggestions. They run through a SQLite queue, resume after a backend restart, and can be paused under **Settings → Archive automation**. The existing full-review selection queue is browser-based: keep its tab open until it finishes.
+<a name="overview"></a>
+## `> meet_reelvault`
 
-Offloaded videos with cached thumbnails can be described without a download. Those without a preview wait in **waiting for a local preview**, then retry periodically. Download that specific file in Finder or use Quick Look when you want it processed. Automatic scans and quick descriptions never request cloud downloads, move originals, delete originals, or evict them. Finder/cloud software still manages which originals remain local.
+**ReelVault is the application in `cojo_social_media_dashboard`.** It indexes existing video folders without moving originals, keeps editorial work in SQLite, and gives the same catalog to a React dashboard and a Python CLI.
 
-Settings shows scan results, storage counts, queue progress, errors, and estimated API usage. **Describe missing / retry** queues unfinished work; **Pause descriptions** takes effect after the current request. The default quick-description estimate limit is $1 per UTC day. It is not a Google account spending cap and excludes full reviews; actual billing and rate limits are set by your API project.
+Browse by subject, filename, folder, storage state, captions, or notes. Review suggestions separately from the text you approve.
 
-See [the storage and cost design notes](ARCHIVE_DESIGN.md) for provider recommendations, price calculations, limitations, and the measured pilot.
+| Discover | Prepare | Approve |
+| :--- | :--- | :--- |
+| Recursively catalog video files and track local, offloaded, or missing sources. | Add notes and captions; optionally request visual labels or a full Gemini review. | Expose only ready, approved records with a nonblank caption and a source not marked missing. |
 
-## Setup
+> [!IMPORTANT]
+> **This prepares content; it does not publish it.** There are no social-platform login, scheduling, or posting integrations. The ready queue is a handoff surface, not proof that a post was delivered.
 
-Use Python 3.10+ and a Node version supported by the installed Vite release (the verified workstation runtime is Node 26). Install FFmpeg for local frame extraction; cached-thumbnail descriptions work without it.
+<a name="architecture"></a>
+## `> trace_the_signal`
 
-```bash
-python -m pip install -r backend/requirements.txt
-npm ci --prefix frontend
-# For a NEW setup only; preserve an existing .env and its API key.
-cp .env.example .env
-# Set REELS_FOLDER and optionally GEMINI_API_KEY in .env.
-./start.sh
+<p align="center">
+  <img src="readme-assets/flow.svg" alt="Existing videos → local catalog and caption review → approved content queue, with no automatic publishing." width="100%">
+</p>
+
+```text
+Existing video folders
+        ↓ metadata discovery
+FastAPI + SQLite ←→ React workbench / Typer CLI
+        ├─ cached thumbnails + persistent quick-description jobs
+        ├─ optional stills or full-video upload → Gemini
+        └─ human approval → ready queue / JSON or CSV export
 ```
 
-The dashboard is at [127.0.0.1:5173](http://127.0.0.1:5173). The API is at [127.0.0.1:8000](http://127.0.0.1:8000/docs). On this workstation, requirements are installed in the Miniconda `python`; the launcher discovers it.
+The CLI imports the backend directly; it does not call the HTTP API. The backend owns periodic scans and the durable quick-description worker. Full-review selections are processed by the browser queue, so keep that tab open until the batch finishes.
 
-Without a Gemini key, browsing, scans, editing, and approvals work normally. Cloud downloads require the relevant provider to be running and signed in. macOS dataless-file detection works without PyObjC; an optional installed Foundation bridge can request iCloud downloads explicitly. Playback otherwise uses a bounded child process to trigger the provider's normal read/download behavior.
+### Two distinct AI paths
 
-Configuration lives in `.env`; see [.env.example](.env.example). Relative paths are anchored at the repository root. The existing iCloud `SnapIGTik Download` folder is auto-detected only when `REELS_FOLDER` is omitted. An unavailable configured source is reported as an error and is never silently recreated.
+| Mode | Evidence sent | Result |
+| :--- | :--- | :--- |
+| Quick description | Up to three small local frames, or one cached thumbnail; no audio | Rough summary, category, searchable tags |
+| Full video review | Original video uploaded through Gemini Files API, including audio | Summary, suggested caption, hashtags, platform suggestion, review notes |
 
-## Data and recovery
+Quick descriptions do not overwrite manual captions or approval. The full-review prompt defaults toward home-services marketing unless the clip suggests another subject. Review its output for your actual audience.
 
-- `data/reelvault.db`: catalog, editorial work, descriptions, durable jobs, recorded AI usage.
-- `data/thumbnails/`: small cached previews used while originals are offloaded.
-- `data/backups/`: automatic SQLite backups made before additive schema migrations of populated databases.
-- `data/reelvault.worker.lock`: process lock preventing duplicate background workers.
+<a name="quickstart"></a>
+## `> open_the_archive`
 
-SQLite uses WAL and a busy timeout. Missing or moved source files retain their IDs, captions, and notes. Changing a file's contents clears its cached quick description and thumbnail reference for regeneration; manual text and historical full analysis are retained. File identity still depends on absolute path: moving or renaming originals creates new records. Do not migrate the source tree merely by changing the path if you want to retain identities; plan a catalog relink first.
+**Prerequisites:** Git, Python 3.10+, Node.js 22.13+ within the 22.x line or Node.js 24+, npm, and FFmpeg for local frame extraction. The backend worker uses POSIX file locking: macOS/Linux are the setup path here; native Windows is not established. Finder, Quick Look, and iCloud-specific behavior require macOS.
 
-Back up the database with SQLite's backup API while running; do not copy only the `.db` file while WAL writes are active. To restore a migration backup, stop the backend and CLI writers, preserve the current `.db`, `-wal`, and `-shm` files, and restore the chosen backup to `DATABASE_PATH` before restarting. A restart reapplies supported additive migrations. Source videos are never part of these database backups.
-
-## CLI
+### 1. Prepare a fresh checkout
 
 ```bash
-python cli/reelctl.py scan
+git clone https://github.com/cojovi/cojo_social_media_dashboard.git
+cd cojo_social_media_dashboard
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements.txt
+npm ci --prefix frontend
+# Create only if absent; preserve existing local configuration.
+test -e backend/.env || cp .env.example backend/.env
+```
+
+### 2. Configure before starting
+
+Edit **`backend/.env`**. Set `REELS_FOLDER`, `DATABASE_PATH`, and `THUMBNAILS_FOLDER` to your own **absolute paths**, keeping the database and thumbnail cache outside the checkout. The video directory must already exist. For a first local-only session, leave `GEMINI_API_KEY` blank, ensure it is not exported in your shell, and set `AUTO_QUICK_SUMMARY=false`.
+
+> [!NOTE]
+> **The current settings loader resolves its root to `backend/`, not the repository root.** Direct backend and CLI commands read `backend/.env`, and relative storage paths resolve under `backend/`. The separate [start.sh](start.sh) launcher exports a root `.env` instead. Use the direct commands below consistently so the UI and CLI share one configuration. See [settings.py](backend/app/settings.py).
+
+### 3. Start the two development servers
+
+In the activated Python environment, from the repository root:
+
+```bash
+PYTHONPATH=backend python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+In a second terminal, from the same repository root:
+
+```bash
+npm run dev --prefix frontend -- --host 127.0.0.1 --port 5173 --strictPort
+```
+
+Open **[http://127.0.0.1:5173](http://127.0.0.1:5173)**. API documentation is at **[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)**. Without a Gemini key, scanning, browsing, editing, and approvals remain available.
+
+Keep both servers on loopback. These are development servers, not a public deployment recipe.
+
+<a name="configuration"></a>
+## `> tune_the_archive`
+
+The [.env.example](.env.example) lists configuration keys; the [settings loader](backend/app/settings.py) defines defaults. Restart the backend after changing environment settings.
+
+| Setting | Purpose / default |
+| :--- | :--- |
+| `REELS_FOLDER` | Existing source tree; choose an explicit absolute path. |
+| `DATABASE_PATH` | SQLite catalog; relative default `./data/reelvault.db` under `backend/`. |
+| `THUMBNAILS_FOLDER` | Cached previews; relative default `./data/thumbnails` under `backend/`. |
+| `GEMINI_API_KEY` | Optional cloud-analysis credential; blank disables AI requests. |
+| `GEMINI_MODEL` | Full-review model; default `gemini-2.5-flash`. |
+| `QUICK_SUMMARY_MODEL` | Visual-label model; default `gemini-2.5-flash-lite`. |
+| `AUTO_SCAN` | Startup/periodic discovery; default `true`. |
+| `SCAN_INTERVAL_SECONDS` | Default `900`, minimum `30`. |
+| `AUTO_QUICK_SUMMARY` | Enqueue undescribed items after scans; default `true`. |
+| `FILE_SETTLE_SECONDS` | Wait for stable new files; default `60`. |
+
+`QUICK_SUMMARY_DELAY_SECONDS` defaults to `4`; `QUICK_SUMMARY_DAILY_BUDGET_USD` defaults to `1`. The budget is an **application estimate limit for quick descriptions**, not a provider billing cap, and excludes full reviews. Model identifiers are source defaults, not guarantees of provider availability.
+
+`APP_HOST`, `APP_PORT`, and `FRONTEND_PORT` are also read by settings. The direct commands above explicitly choose the listening ports; [Vite's proxy](frontend/vite.config.ts) is fixed to backend port `8000`. Changing environment port values alone does not update the frontend proxy or Vite's configured port.
+
+<a name="usage"></a>
+## `> curate_the_queue`
+
+1. Add supported videos beneath the configured source folder: MP4, MOV, M4V, AVI, WEBM, or MKV.
+2. Let startup/periodic scanning discover them, or use **Rescan Folder**. Empty files and recent writes wait for a later scan.
+3. Search and filter the catalog. Open playback intentionally; editing and hovering do not preload originals.
+4. Optionally enable quick descriptions or request a full review. Offloaded files without a cached preview wait for local media.
+5. Write a final caption, approve it, then mark it ready. Approval and status are separate controls.
+6. Read or export the ready queue for a separate, explicitly authorized posting workflow.
+
+Run CLI commands from the repository root with the same Python environment and `backend/.env`:
+
+```bash
 python cli/reelctl.py list
-python cli/reelctl.py show 123
-python cli/reelctl.py set-post 123 "Final caption"
-python cli/reelctl.py set-hashtags 123 "#roofing #dallas"
-python cli/reelctl.py status 123 ready
-python cli/reelctl.py analyze 123
-python cli/reelctl.py describe-missing
-python cli/reelctl.py describe-missing --retry
 python cli/reelctl.py archive-status
-python cli/reelctl.py pause-descriptions
-python cli/reelctl.py pause-descriptions --resume
 python cli/reelctl.py next-ready
 python cli/reelctl.py export-ready --format json
 ```
 
-`describe-missing` queues work for the running backend. `scan` alone indexes metadata. `archive-status` and `export-ready` produce JSON for agents. The web API exposes equivalent archive controls under `/api/archive` and the posting queue at `/api/queue/ready`.
+Additional commands include `scan`, `show`, `set-post`, `set-hashtags`, `approve`, `status`, `analyze`, `describe-missing`, and `pause-descriptions`. `analyze` can upload a video and incur provider charges; `describe-missing` queues backend work. Review command help before changing records.
 
-## Verification
+API equivalents include `/api/reels`, `/api/archive`, and `/api/queue/ready`. Queue eligibility excludes records marked missing, but does not guarantee an offloaded original is immediately downloadable.
+
+<a name="storage"></a>
+## `> preserve_the_work`
+
+- SQLite stores editorial fields, descriptions, jobs, and recorded AI usage; thumbnails live separately.
+- Scans do not move or delete originals, request bulk cloud downloads, or evict files. Explicit playback can trigger a provider download.
+- Missing files retain their catalog history. Identity is based on absolute path: moving or renaming originals creates new records rather than relinking old ones.
+- Changed source content clears cached quick-description/thumbnail references; manual text and historical full analysis remain.
+- Populated databases receive backups before supported additive migrations. Backups are written beside the database in `backups/`.
+
+Use SQLite's backup API for a live database. Do not copy only the `.db` file while WAL writes are active. Stop all backend/CLI writers before restoring, retain the current database and its WAL/SHM files, and restore the chosen backup to `DATABASE_PATH`. Database backups do not include source videos.
+
+<a name="validation"></a>
+## `> check_the_work`
+
+The repository provides these development checks:
 
 ```bash
 PYTHONPATH=backend python -m pytest backend/tests -q
@@ -87,4 +178,41 @@ npm run build --prefix frontend
 npm run lint --prefix frontend
 ```
 
-Tests isolate their database, source folder, and API settings. Keep the app on loopback: it is a personal local tool, without multi-user authentication. Cloud API adapters, automatic eviction, social scheduling/publishing, and rename-aware catalog relinking remain future work.
+**Builds, tests, application startup, and provider calls were not run for this docs-only task.** Source inspection is not runtime certification.
+
+Before using a real archive, confirm the configured directories, shared CLI/UI database, loopback binding, queue rules, backup strategy, and cloud-upload consent using a small non-sensitive fixture set.
+
+<a name="source"></a>
+## `> explore_the_source`
+
+| Source | Responsibility |
+| :--- | :--- |
+| [API entrypoint](backend/app/main.py) | FastAPI routes, thumbnails, worker lifecycle |
+| [Scanner](backend/app/scanner.py) / [worker](backend/app/archive.py) | Discovery, persistent jobs, retries and pause state |
+| [Models](backend/app/models.py) / [database](backend/app/database.py) | Editorial validation, queue predicates, SQLite migrations |
+| [Dashboard](frontend/src/App.tsx) / [archive panel](frontend/src/ArchivePanel.tsx) | Browsing, editing, automation visibility |
+| [CLI](cli/reelctl.py) | Local catalog operations and export |
+| [Archive design](ARCHIVE_DESIGN.md) | Design rationale and historical measurements, not current test results |
+
+<a name="security"></a>
+## `> draw_the_boundary`
+
+**Single-user, trusted local use only.** There is no multi-user authentication. CORS is not access control; do not expose the API, thumbnails, or development UI to untrusted networks.
+
+AI is optional but not on-device: selected stills or videos leave the machine. Full-review upload cleanup is attempted, not guaranteed. Protect configuration, database backups, logs, and media; clear sensitive content from bug reports. Keep real keys out of Git.
+
+No repository license file was found in this revision. Public source visibility does not grant a permissive reuse license; obtain permission before redistribution or use that requires one.
+
+---
+
+<p align="center">
+  <img src="readme-assets/signal-divider.svg" alt="" width="100%">
+</p>
+
+<p align="center">
+  <strong>Originals stay put. Editorial control stays yours.</strong><br>
+  <sub>A <a href="https://github.com/cojovi">Cody / cojovi</a> project · <a href="https://cojovi.com">cojovi.com</a><br>
+  ReelVault, presented in COJOVI / SIGNAL.</sub>
+</p>
+
+<p align="center"><a href="#top">↑ Back to the signal</a></p>
