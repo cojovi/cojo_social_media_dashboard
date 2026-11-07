@@ -52,6 +52,16 @@ must finish syncing to Dropbox before the hosted dashboard can see them.
 5. Click **Preview** on a card for a small, silent sample, then **Open full video with audio** for complete playback. Quick Look and workbench Play also play the original. Editing and hovering do not preload videos.
 6. Request **Full video review + captions** when you need audio/context and posting suggestions. Write or adopt a final caption and mark it ready.
 
+**Collapse the navigation panels:** On desktop, use the panel button just left of the page
+title to switch between the full menu and a narrow icon rail. Navigation and
+Settings remain clickable; hover an icon for its label and reel count. Use
+**Hide folders** above the filters to hide the **Your Library** folder panel
+completely, then **Show folders** to restore it. Breadcrumbs and folder tiles remain
+available. Each panel's preference is remembered independently in this browser
+when local storage is available. Toggling preserves folder, search, reel selection
+and expanded folder-tree branches. On smaller screens the existing responsive
+navigation remains unchanged; the folder toggle appears only when its panel fits.
+
 Only `ready` + `approved` + nonblank final caption + source not marked missing enters the ready queue. Nothing publishes to social platforms automatically.
 
 ## Small video previews
