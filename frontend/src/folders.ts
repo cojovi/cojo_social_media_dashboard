@@ -3,7 +3,7 @@ import type { LibraryItem } from './api';
 export interface FolderNode {
   name: string;
   path: string;
-  /** Unique exact-copy groups directly in this folder, not descendants. */
+  /** Unique unposted exact-copy groups directly in this folder, not descendants. */
   count: number;
   fileCount: number;
   children: FolderNode[];
@@ -59,6 +59,11 @@ export function filterReelsByFolder<T extends LibraryItem>(reels: T[], reelsRoot
   return reels.filter(reel => folderKey(getRelativeFolder(reel.filepath, reelsRoot), reelsRoot) === selected);
 }
 
+/** Home is a browsing queue, not posting history. Explicit tabs own their status. */
+export function filterReelsByView<T extends Pick<LibraryItem, 'status'>>(reels: T[], view: 'all' | LibraryItem['status']): T[] {
+  return reels.filter(reel => view === 'all' ? reel.status !== 'posted' : reel.status === view);
+}
+
 /** One catalog pass builds stable navigation even while the grid is filtered. */
 export function buildLibraryIndex(reels: LibraryItem[], reelsRoot: string, includeMissing = false) {
   // Missing paths are history, not current folder membership or available copies.
@@ -84,6 +89,9 @@ export function buildLibraryIndex(reels: LibraryItem[], reelsRoot: string, inclu
   for (const reel of members) {
     const path = getRelativeFolder(reel.filepath, reelsRoot);
     const node = ensure(path);
+    // Retain the folder even when its last reel is posted, but do not count that
+    // reel in Home/folder browsing. The complete copy index remains available.
+    if (reel.status === 'posted') continue;
     node.fileCount++;
     const key = folderKey(path, reelsRoot);
     let seen = identities.get(key);

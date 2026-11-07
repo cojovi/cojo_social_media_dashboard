@@ -3,19 +3,22 @@ import {
   Film, CheckCircle2, AlertCircle, FileText, Send, Archive, 
   Settings as SettingsIcon, Search, RefreshCw, Sparkles, 
   Copy, Trash2, Video, Info, Folder, StickyNote, ScanEye, X,
-  CheckSquare, Square, ListChecks, Loader2, Play
+  CheckSquare, Square, ListChecks, Loader2, Play, PanelLeftClose, PanelLeftOpen
 } from 'lucide-react';
 import { api } from './api';
 import type { Reel, StatusCounts, HealthStatus, ArchiveStatus, LibraryItem } from './api';
 import { ArchivePanel } from './ArchivePanel';
 import { StoragePanel } from './StoragePanel';
 import { ReelPreview } from './ReelPreview';
+import { useInfiniteReels } from './useInfiniteReels';
 import { useAnalysisQueue } from './useAnalysisQueue';
 import { FolderSidebar, FolderLocation } from './FolderNavigation';
 import { DuplicateCopiesDialog } from './DuplicateCopiesDialog';
+import { readSidebarCollapsed, saveSidebarCollapsed, readFolderSidebarCollapsed, saveFolderSidebarCollapsed } from './sidebarPreferences';
 import {
   buildLibraryIndex,
   filterReelsByFolder,
+  filterReelsByView,
   getRelativeFolder,
   folderKey,
   exactCopyKey,
@@ -24,6 +27,10 @@ import {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'all' | 'draft' | 'needs_review' | 'ready' | 'posted' | 'archived' | 'settings'>('all');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
+  useEffect(() => { saveSidebarCollapsed(sidebarCollapsed); }, [sidebarCollapsed]);
+  const [folderSidebarCollapsed, setFolderSidebarCollapsed] = useState(readFolderSidebarCollapsed);
+  useEffect(() => { saveFolderSidebarCollapsed(folderSidebarCollapsed); }, [folderSidebarCollapsed]);
   const [reels, setReels] = useState<Reel[]>([]);
   const [libraryItems, setLibraryItems] = useState<LibraryItem[]>([]);
   const [groupCopies, setGroupCopies] = useState(true);
@@ -41,7 +48,6 @@ export default function App() {
   const closePreview = useCallback(() => setPreviewReelId(null), []);
   const [archiveStatus, setArchiveStatus] = useState<ArchiveStatus | null>(null);
   const [availability, setAvailability] = useState('');
-  const [gridPage, setGridPage] = useState({ key: '', limit: 60 });
   const [hasQuickSummary, setHasQuickSummary] = useState<boolean | null>(null);
   
   // Filters
@@ -117,7 +123,10 @@ export default function App() {
   // index so it works both on the Mac root and inside the Dropbox wrapper folder.
   const currentFolder = library.nodes.get(folderKey(selectedFolder ?? library.home.path, reelsRoot)) || library.home;
   const folderReels = useMemo(
-    () => activeTab === 'all' ? filterReelsByFolder(reels, reelsRoot, currentFolder.path) : reels,
+    () => {
+      const viewReels = filterReelsByView(reels, activeTab === 'settings' ? 'all' : activeTab);
+      return activeTab === 'all' ? filterReelsByFolder(viewReels, reelsRoot, currentFolder.path) : viewReels;
+    },
     [reels, reelsRoot, currentFolder.path, activeTab]
   );
   const displayedReels = useMemo(
@@ -128,8 +137,23 @@ export default function App() {
 
   const gridKey = JSON.stringify([activeTab, searchTerm, hasFinalPost, hasAiSummary, hasQuickSummary, availability, currentFolder.path, groupCopies]);
   useEffect(() => () => closePreview(), [gridKey, closePreview]);
-  const visibleLimit = gridPage.key === gridKey ? gridPage.limit : 60;
+  const { limit: visibleLimit, hasMore: hasMoreReels, scrollRef: reelScrollRef, sentinelRef: reelSentinelRef } =
+    useInfiniteReels(gridKey, displayedReels.length, loading);
   const renderedReels = displayedReels.slice(0, visibleLimit);
+
+  const updateCatalogReel = useCallback((updated: Reel) => {
+    setReels(prev => prev.map(reel => reel.id === updated.id ? updated : reel));
+    setLibraryItems(prev => prev.map(item => item.id === updated.id ? {
+      ...item, status: updated.status, storage_status: updated.storage_status,
+    } : item));
+    if (updated.status === 'posted') {
+      setSelectedIds(prev => {
+        if (!prev.has(updated.id)) return prev;
+        const next = new Set(prev); next.delete(updated.id); return next;
+      });
+      setPreviewReelId(current => current === updated.id ? null : current);
+    }
+  }, []);
 
   const syncFormFromReel = (reel: Reel) => {
     setStatusInput(reel.status);
@@ -179,7 +203,7 @@ export default function App() {
   const clearSelection = () => setSelectedIds(new Set());
 
   const handleBatchAnalyze = () => {
-    const selected = reels.filter(r => selectedIds.has(r.id));
+    const selected = displayedReels.filter(r => selectedIds.has(r.id));
     if (selected.length === 0) return;
     enqueueAnalysis(selected);
     setSelectedIds(new Set());
@@ -245,8 +269,9 @@ export default function App() {
         setEditingReel(updated);
         if (JSON.stringify(formValuesRef.current) === JSON.stringify(payload)) syncFormFromReel(updated);
       }
-      setReels(prev => prev.map(r => (r.id === updated.id ? updated : r)));
-      api.getStats().then(setStats).catch(() => {});
+      updateCatalogReel(updated);
+      // Starts a new request version so an older poll cannot restore pre-save status.
+      void loadData(true);
       setSaveStatus('saved');
       if (!silent) addToast('Draft saved to database.', 'success');
       return true;
@@ -262,6 +287,8 @@ export default function App() {
     editingReel,
     formDiffersFromBaseline,
     addToast,
+    updateCatalogReel,
+    loadData,
   ]);
 
   useEffect(() => {
@@ -450,12 +477,14 @@ export default function App() {
     if (editingReel?.id === id && !await persistReel({ silent: true })) return;
     try {
       const updated = await api.markPosted(id);
+      updateCatalogReel(updated);
       addToast("Reel marked as posted on social media.", "success");
-      if (editingReel && editingReel.id === id) {
+      if (editingIdRef.current === id) {
+        saveBaselineRef.current = updated;
         setEditingReel(updated);
         setStatusInput(updated.status);
       }
-      loadData();
+      void loadData(true);
     } catch (error: unknown) {
       addToast(error instanceof Error ? error.message : 'Action failed.', "error");
     }
@@ -525,11 +554,12 @@ export default function App() {
       </div>
 
       {/* Left Sidebar Navigation */}
-      <aside className="w-64 border-r border-plum-800 bg-plum-950/90 hidden md:flex flex-col shrink-0">
+      <aside id="main-sidebar" aria-label="Main menu" data-collapsed={sidebarCollapsed}
+        className={`${sidebarCollapsed ? 'w-20' : 'w-64'} border-r border-plum-800 bg-plum-950/90 hidden md:flex flex-col shrink-0 min-h-0 transition-[width] duration-200 motion-reduce:transition-none`}>
         {/* Brand Logo */}
-        <div className="h-20 flex items-center gap-3 px-6 border-b border-plum-800">
-          <Film className="w-8 h-8 text-neon-cyan animate-pulse" />
-          <div>
+        <div className={`h-20 shrink-0 flex items-center gap-3 border-b border-plum-800 overflow-hidden ${sidebarCollapsed ? 'justify-center px-2' : 'px-6'}`}>
+          <Film aria-hidden="true" className="w-8 h-8 shrink-0 text-neon-cyan animate-pulse" />
+          <div className={sidebarCollapsed ? 'sr-only' : 'whitespace-nowrap'}>
             <h1 className="text-xl font-retro font-bold tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-neon-cyan to-neon-pink text-retro-glow">
               REELVAULT
             </h1>
@@ -538,7 +568,7 @@ export default function App() {
         </div>
 
         {/* Tab Items */}
-        <nav className="flex-1 px-4 py-6 flex flex-col gap-2">
+        <nav aria-label="Archive navigation" className={`flex-1 min-h-0 overflow-y-auto py-6 flex flex-col gap-2 ${sidebarCollapsed ? 'px-2' : 'px-4'}`}>
           {[
             { id: 'all', label: 'Home', icon: Film },
             { id: 'draft', label: 'Drafts', icon: FileText },
@@ -549,11 +579,16 @@ export default function App() {
           ].map(tab => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
+            const count = tab.id === 'all' ? library.home.count : stats?.[tab.id as keyof StatusCounts];
             return (
               <button
                 key={tab.id}
+                type="button"
+                aria-label={tab.label}
+                aria-current={isActive ? 'page' : undefined}
+                title={sidebarCollapsed ? `${tab.label}${count === undefined ? '' : ` (${count} reels)`}` : undefined}
                 onClick={async () => { if (!await handleCloseWorkbench()) return; setSelectedFolder(null); setSelectionMode(false); clearSelection(); setActiveTab(tab.id as typeof activeTab); if (tab.id === 'all') clearFilters(); }}
-                className={`w-full flex items-center justify-between px-4 py-3 rounded-lg border transition-all duration-200 cursor-pointer ${
+                className={`w-full shrink-0 flex items-center py-3 rounded-lg border transition-all duration-200 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neon-cyan ${sidebarCollapsed ? 'justify-center px-2' : 'justify-between px-4'} ${
                   isActive 
                     ? tab.highlight 
                       ? 'bg-gradient-to-r from-green-950 to-plum-900 border-green-500/80 text-green-400 shadow-[0_0_12px_rgba(34,197,94,0.3)]'
@@ -562,42 +597,48 @@ export default function App() {
                 }`}
               >
                 <div className="flex items-center gap-3">
-                  <Icon className={`w-5 h-5 ${isActive ? 'text-cyan-400' : 'text-purple-400/80'}`} />
-                  <span className="font-medium text-sm">{tab.label}</span>
+                  <Icon aria-hidden="true" className={`w-5 h-5 shrink-0 ${isActive ? 'text-cyan-400' : 'text-purple-400/80'}`} />
+                  <span className={sidebarCollapsed ? 'sr-only' : 'font-medium text-sm'}>{tab.label}</span>
                 </div>
-                {stats && stats[tab.id as keyof StatusCounts] !== undefined && (
+                {!sidebarCollapsed && stats && count !== undefined && (
                   <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
                     isActive ? 'bg-plum-950 text-white' : 'bg-plum-900 text-purple-400'
                   }`}>
-                    {tab.id === 'all' ? library.home.count : stats[tab.id as keyof StatusCounts]}
+                    {count}
                   </span>
                 )}
               </button>
             );
           })}
-          <p className="text-[10px] text-purple-400/70 px-4 mt-2 leading-relaxed">Home shows your main folder. Workflow queues span all folders; their counts include copies.</p>
+          {!sidebarCollapsed && <p className="text-[10px] text-purple-400/70 px-4 mt-2 leading-relaxed">Home excludes posted reels. Find them in Posted. Workflow queues span all folders; their counts include copies.</p>}
         </nav>
 
         {/* System Health Summary & Settings link */}
-        <div className="p-4 border-t border-plum-800 bg-plum-950/50 flex flex-col gap-3">
-          <button 
+        <div className={`shrink-0 py-4 border-t border-plum-800 bg-plum-950/50 flex flex-col gap-3 ${sidebarCollapsed ? 'px-2' : 'px-4'}`}>
+          <button
+            type="button"
+            aria-label="Settings"
+            aria-current={activeTab === 'settings' ? 'page' : undefined}
+            title={sidebarCollapsed ? 'Settings' : undefined}
             onClick={async () => { if (await handleCloseWorkbench()) setActiveTab('settings'); }}
-            className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg border text-sm transition-all duration-200 cursor-pointer ${
+            className={`w-full flex items-center gap-3 min-h-11 py-2.5 rounded-lg border text-sm transition-all duration-200 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neon-cyan ${sidebarCollapsed ? 'justify-center px-2' : 'px-4'} ${
               activeTab === 'settings' 
                 ? 'bg-plum-900 border-neon-pink/80 text-neon-pink shadow-[0_0_10px_rgba(255,0,127,0.3)]'
                 : 'bg-transparent border-transparent text-purple-300 hover:bg-plum-900/40'
             }`}
           >
-            <SettingsIcon className="w-4 h-4" />
-            <span>Settings</span>
+            <SettingsIcon aria-hidden="true" className="w-4 h-4 shrink-0" />
+            <span className={sidebarCollapsed ? 'sr-only' : undefined}>Settings</span>
           </button>
           
-          <div className="flex items-center justify-between px-2 text-[10px] text-purple-400/80">
-            <span className="flex items-center gap-1.5">
+          <div className={`flex items-center px-2 text-[10px] text-purple-400/80 ${sidebarCollapsed ? 'justify-center' : 'justify-between'}`}>
+            <span className="flex items-center gap-1.5" role="img"
+              aria-label={`AI: ${health?.gemini_configured ? 'Gemini on' : 'offline'}`}
+              title={`AI: ${health?.gemini_configured ? 'Gemini on' : 'offline'}`}>
               <span className={`w-2.5 h-2.5 rounded-full ${health?.gemini_configured ? 'bg-green-500 shadow-[0_0_6px_#22c55e]' : 'bg-red-500'}`} />
-              AI: {health?.gemini_configured ? 'GEMINI ON' : 'OFFLINE'}
+              {!sidebarCollapsed && <>AI: {health?.gemini_configured ? 'GEMINI ON' : 'OFFLINE'}</>}
             </span>
-            <span className="opacity-80">v2.0.0</span>
+            {!sidebarCollapsed && <span className="opacity-80">v2.0.0</span>}
           </div>
         </div>
       </aside>
@@ -607,6 +648,14 @@ export default function App() {
         {/* Top App Bar */}
         <header className="h-20 border-b border-plum-800 px-3 md:px-8 flex items-center justify-between gap-2 shrink-0 glass-panel">
           <div className="flex items-center gap-3">
+            <button type="button"
+              onClick={() => setSidebarCollapsed(collapsed => !collapsed)}
+              aria-label={sidebarCollapsed ? 'Expand side menu' : 'Collapse side menu'}
+              title={sidebarCollapsed ? 'Expand side menu' : 'Collapse side menu'}
+              aria-expanded={!sidebarCollapsed} aria-controls="main-sidebar"
+              className="hidden md:flex shrink-0 w-11 h-11 items-center justify-center rounded-lg border border-plum-700 bg-plum-950 text-purple-300 hover:border-neon-cyan/60 hover:text-neon-cyan focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neon-cyan transition-colors cursor-pointer">
+              {sidebarCollapsed ? <PanelLeftOpen aria-hidden="true" className="w-5 h-5" /> : <PanelLeftClose aria-hidden="true" className="w-5 h-5" />}
+            </button>
             <select aria-label="Navigate archive" value={activeTab} className="md:hidden max-w-36 bg-plum-950 border border-plum-700 rounded-lg p-2 text-sm text-neon-cyan"
               onChange={async event => {
                 const tab = event.target.value as typeof activeTab;
@@ -738,6 +787,15 @@ export default function App() {
                     {archiveStatus?.paused ? 'Descriptions paused' : `${archiveStatus?.jobs.queued || 0} descriptions queued`} · Manage
                   </button>
                   {archiveStatus?.scan.error && <span className="text-amber-300">Scan needs attention — see Settings</span>}
+                  {activeTab === 'all' && reelsRoot && <button type="button"
+                    onClick={() => setFolderSidebarCollapsed(collapsed => !collapsed)}
+                    aria-label={folderSidebarCollapsed ? 'Show folder navigation' : 'Hide folder navigation'}
+                    title={folderSidebarCollapsed ? 'Show Your Library folder panel' : 'Hide Your Library folder panel'}
+                    aria-expanded={!folderSidebarCollapsed} aria-controls="library-folder-sidebar"
+                    className="hidden xl:inline-flex ml-auto items-center gap-2 min-h-9 rounded-lg border border-plum-700 bg-plum-950 px-3 py-2 font-medium text-purple-300 hover:border-neon-cyan/60 hover:text-neon-cyan focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neon-cyan transition-colors cursor-pointer">
+                    <Folder aria-hidden="true" size={15} />
+                    {folderSidebarCollapsed ? 'Show folders' : 'Hide folders'}
+                  </button>}
                 </div>
                 {/* Filters Row */}
                 <div className="glass-panel p-4 rounded-xl border border-plum-800 flex flex-wrap gap-4 items-center justify-between shadow-md">
@@ -791,14 +849,14 @@ export default function App() {
                 {/* Scrollable Reels List Grid Container */}
                 <div className="flex-1 flex gap-4 min-h-0 overflow-hidden">
                   {activeTab === 'all' && reelsRoot && <FolderSidebar library={library} current={currentFolder}
-                    reelsRoot={reelsRoot} onNavigate={path => { void handleNavigateFolder(path); }} />}
+                    reelsRoot={reelsRoot} collapsed={folderSidebarCollapsed} onNavigate={path => { void handleNavigateFolder(path); }} />}
 
-                  <div className="flex-1 overflow-y-auto pr-1 min-w-0">
+                  <div ref={reelScrollRef} role="region" tabIndex={0} aria-label="Scrollable reel library" className="flex-1 overflow-y-auto pr-1 min-w-0">
                   {activeTab === 'all' && reelsRoot && <FolderLocation library={library} current={currentFolder}
                     reelsRoot={reelsRoot} onNavigate={path => { void handleNavigateFolder(path); }} />}
                   <div className="flex flex-wrap items-center justify-between gap-3 mb-4 text-xs text-purple-300">
                     <p aria-live="polite">{displayedReels.length.toLocaleString()} {groupCopies ? 'unique reels' : 'files'}
-                      {activeTab === 'all' ? ' in this folder' : ' across all folders'}
+                      {activeTab === 'all' ? ' not yet posted in this folder' : ' across all folders'}
                       {groupCopies && folderReels.length > displayedReels.length && <span className="text-purple-400"> · {folderReels.length - displayedReels.length} extra copies grouped</span>}
                     </p>
                     <label className="flex items-center gap-2 cursor-pointer rounded focus-within:outline-neon-cyan">
@@ -821,7 +879,7 @@ export default function App() {
                       <Film className="w-12 h-12 text-purple-500/50" />
                       <div>
                         <p className="text-lg font-retro font-bold text-purple-300">{activeTab === 'all' ? 'No matching reels in this folder' : 'No matching reels'}</p>
-                        <p className="text-sm text-purple-400/80 mt-1 max-w-sm">{activeTab === 'all' && currentFolder.children.length ? 'Choose a folder above to see its reels. Files in subfolders are not included here.' : 'Try clearing your filters, or rescan after adding new videos.'}</p>
+                        <p className="text-sm text-purple-400/80 mt-1 max-w-sm">{activeTab === 'all' ? 'Posted reels are in the Posted tab. Choose a subfolder above, clear your filters, or add new videos.' : 'Try clearing your filters, or rescan after adding new videos.'}</p>
                         <button type="button" onClick={clearFilters} className="archive-button mt-4">Clear filters</button>
                       </div>
                     </div>
@@ -1031,10 +1089,13 @@ export default function App() {
                       })}
                     </div>
                   )}
-                  {!loading && renderedReels.length < displayedReels.length && (
-                    <button className="archive-button mb-6 w-full justify-center" onClick={() => setGridPage({ key: gridKey, limit: visibleLimit + 60 })}>
-                      Show 60 more · {renderedReels.length} of {displayedReels.length}
-                    </button>
+                  {!loading && displayedReels.length > 0 && (
+                    <div ref={reelSentinelRef} role="status" aria-live="polite"
+                      className="mb-6 py-4 text-center text-xs text-purple-400">
+                      {hasMoreReels
+                        ? `${renderedReels.length} of ${displayedReels.length} reels · More load as you scroll`
+                        : `All ${displayedReels.length} reels shown`}
+                    </div>
                   )}
                   </div>
                 </div>

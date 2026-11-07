@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test:vm": "node tests/vm-smoke.mjs",
-    "test:unit": "node --experimental-strip-types --test tests/library.test.mjs"
+    "test:unit": "node --experimental-strip-types --test tests/*.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.16.0",

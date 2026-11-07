@@ -10,7 +10,7 @@ interface Props {
   onNavigate: (path: string) => void;
 }
 
-export function FolderSidebar({ library, current, reelsRoot, onNavigate }: Props) {
+export function FolderSidebar({ library, current, reelsRoot, onNavigate, collapsed }: Props & { collapsed: boolean }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const selectedKey = folderKey(current.path, reelsRoot);
   function renderNode(node: FolderNode, depth = 0) {
@@ -42,7 +42,8 @@ export function FolderSidebar({ library, current, reelsRoot, onNavigate }: Props
       {open && node.children.length > 0 && <ul>{node.children.map(child => renderNode(child, depth + 1))}</ul>}
     </li>;
   }
-  return <aside className="hidden xl:flex w-60 shrink-0 glass-panel rounded-xl border border-plum-800 flex-col overflow-hidden">
+  return <aside id="library-folder-sidebar" aria-label="Your Library" data-collapsed={collapsed}
+    className={`${collapsed ? 'hidden' : 'hidden xl:flex'} w-60 shrink-0 glass-panel rounded-xl border border-plum-800 flex-col overflow-hidden`}>
     <div className="p-4 border-b border-plum-800">
       <p className="text-[10px] uppercase tracking-widest text-purple-400 mb-3">Your library</p>
       <button type="button" onClick={() => onNavigate(library.home.path)}
@@ -60,7 +61,7 @@ export function FolderSidebar({ library, current, reelsRoot, onNavigate }: Props
         <ul>{library.root.children.filter(node => node !== library.home).map(node => renderNode(node))}</ul>
       </>}
     </nav>
-    <p className="p-3 border-t border-plum-800 text-[10px] text-purple-400 leading-relaxed">Counts exclude subfolders and group exact copies. Opening a folder shows only its own reels.</p>
+    <p className="p-3 border-t border-plum-800 text-[10px] text-purple-400 leading-relaxed">Counts exclude posted reels and subfolders, and group exact copies. Posting history is in Posted.</p>
   </aside>;
 }
 
@@ -86,6 +87,6 @@ export function FolderLocation({ library, current, reelsRoot, onNavigate }: Prop
         </span><ChevronRight size={14} className="text-purple-400 shrink-0" />
       </button>)}
     </div>}
-    <p className="text-xs text-purple-400">Only reels directly in this folder. Subfolder reels stay in their folders.</p>
+    <p className="text-xs text-purple-400">Only unposted reels directly in this folder. Posting history is in Posted; subfolder reels stay in their folders.</p>
   </section>;
 }

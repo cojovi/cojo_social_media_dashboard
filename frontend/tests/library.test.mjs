@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildLibraryIndex, exactCopyKey, filterReelsByFolder, folderBreadcrumbs,
+import { buildLibraryIndex, exactCopyKey, filterReelsByFolder, filterReelsByView, folderBreadcrumbs,
   folderKey, getRelativeFolder, groupExactCopies } from '../src/folders.ts';
 
 const root = 'dropbox:/Cody Viveiros/SnapTik_Reel_Archive';
@@ -137,4 +137,56 @@ test('a rescan updates direct membership and filename while retaining the reel I
   assert.deepEqual(filterReelsByFolder(moved, root, home), []);
   assert.equal(filterReelsByFolder(moved, root, `${home}/organized`)[0].filename, 'new name.mp4');
   assert.equal(library.home.children[0].count, 1);
+});
+
+test('Home and nested browsing exclude posted records; Posted spans all folders', () => {
+  const rows = [item(1), item(2, home, { status: 'posted' }),
+    item(3, `${home}/artistic`, { status: 'posted' }), item(4, `${home}/artistic`, { status: 'ready' })];
+  const browsing = filterReelsByView(rows, 'all');
+  assert.deepEqual(filterReelsByFolder(browsing, root, home).map(row => row.id), [1]);
+  assert.deepEqual(filterReelsByFolder(browsing, root, `${home}/artistic`).map(row => row.id), [4]);
+  assert.deepEqual(filterReelsByView(rows, 'posted').map(row => row.id), [2, 3]);
+  assert.deepEqual(filterReelsByView(rows, 'ready').map(row => row.id), [4]);
+  const index = buildLibraryIndex(rows, root);
+  assert.equal(index.home.count, 1);
+  assert.equal(index.home.fileCount, 1);
+  assert.equal(index.home.children[0].count, 1);
+});
+
+test('posting the final item updates counts without losing the current folder or home', () => {
+  const before = [item(1), item(2, `${home}/artistic`)];
+  const after = before.map(row => ({ ...row, status: 'posted' }));
+  assert.equal(buildLibraryIndex(before, root).home.count, 1);
+  const index = buildLibraryIndex(after, root);
+  assert.equal(index.home.path, home);
+  assert.equal(index.home.count, 0);
+  assert.equal(index.home.children[0].name, 'artistic');
+  assert.equal(index.home.children[0].count, 0);
+  assert.deepEqual(filterReelsByView(after, 'all'), []);
+  assert.equal(filterReelsByView(after, 'posted').length, 2);
+  // All records remain addressable in the copy/metadata index. No destructive migration.
+  assert.equal(index.copies.size, 2);
+});
+
+test('status filtering precedes duplicate grouping and preserves independent copy status', () => {
+  const rows = [item(1, home, { content_hash: hash, status: 'posted' }),
+    item(2, home, { content_hash: hash }), item(3, home, { content_hash: hash })];
+  assert.deepEqual(groupExactCopies(filterReelsByView(rows, 'all')).map(row => row.id), [2]);
+  assert.deepEqual(filterReelsByView(rows, 'all').map(row => row.id), [2, 3]);
+  assert.deepEqual(groupExactCopies(filterReelsByView(rows, 'posted')).map(row => row.id), [1]);
+  const index = buildLibraryIndex(rows, root);
+  assert.equal(index.home.count, 1);
+  assert.equal(index.home.fileCount, 2);
+  assert.equal(index.copies.get(exactCopyKey(rows[0])).length, 3);
+});
+
+test('moving a reel back to Draft restores it to browsing without changing its data', () => {
+  const posted = item(1, home, { status: 'posted', notes: 'Preserve notes', final_post_text: 'Keep caption' });
+  const draft = { ...posted, status: 'draft' };
+  assert.equal(filterReelsByView([posted], 'all').length, 0);
+  assert.deepEqual(filterReelsByView([draft], 'all'), [draft]);
+  assert.equal(buildLibraryIndex([draft], root).home.count, 1);
+  assert.equal(filterReelsByView([draft], 'posted').length, 0);
+  assert.equal(draft.final_post_text, posted.final_post_text);
+  assert.equal(draft.notes, posted.notes);
 });
