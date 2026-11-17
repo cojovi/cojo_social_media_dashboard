@@ -95,15 +95,15 @@ source .venv/bin/activate
 python -m pip install -r backend/requirements.txt
 npm ci --prefix frontend
 # Create only if absent; preserve existing local configuration.
-test -e backend/.env || cp .env.example backend/.env
+test -e .env || cp .env.example .env
 ```
 
 ### 2. Configure before starting
 
-Edit **`backend/.env`**. Set `REELS_FOLDER`, `DATABASE_PATH`, and `THUMBNAILS_FOLDER` to your own **absolute paths**, keeping the database and thumbnail cache outside the checkout. The video directory must already exist. For a first local-only session, leave `GEMINI_API_KEY` blank, ensure it is not exported in your shell, and set `AUTO_QUICK_SUMMARY=false`.
+Edit **`.env`**. Set `REELS_FOLDER`, `DATABASE_PATH`, and `THUMBNAILS_FOLDER` to your own **absolute paths**, keeping the database and thumbnail cache outside the checkout. The video directory must already exist. For a first local-only session, leave `GEMINI_API_KEY` blank, ensure it is not exported in your shell, and set `AUTO_QUICK_SUMMARY=false`.
 
 > [!NOTE]
-> **The current settings loader resolves its root to `backend/`, not the repository root.** Direct backend and CLI commands read `backend/.env`, and relative storage paths resolve under `backend/`. The separate [start.sh](start.sh) launcher exports a root `.env` instead. Use the direct commands below consistently so the UI and CLI share one configuration. See [settings.py](backend/app/settings.py).
+> The settings loader reads the repository-root `.env` and resolves relative storage paths from the repository root. Environment variables already set in the shell take precedence. The [start.sh](start.sh) launcher also exports the root `.env`. See [settings.py](backend/app/settings.py).
 
 ### 3. Start the two development servers
 
@@ -131,8 +131,8 @@ The [.env.example](.env.example) lists configuration keys; the [settings loader]
 | Setting | Purpose / default |
 | :--- | :--- |
 | `REELS_FOLDER` | Existing source tree; choose an explicit absolute path. |
-| `DATABASE_PATH` | SQLite catalog; relative default `./data/reelvault.db` under `backend/`. |
-| `THUMBNAILS_FOLDER` | Cached previews; relative default `./data/thumbnails` under `backend/`. |
+| `DATABASE_PATH` | SQLite catalog; relative default `./data/reelvault.db` under the repository root. |
+| `THUMBNAILS_FOLDER` | Cached previews; relative default `./data/thumbnails` under the repository root. |
 | `GEMINI_API_KEY` | Optional cloud-analysis credential; blank disables AI requests. |
 | `GEMINI_MODEL` | Full-review model; default `gemini-2.5-flash`. |
 | `QUICK_SUMMARY_MODEL` | Visual-label model; default `gemini-2.5-flash-lite`. |
@@ -155,7 +155,7 @@ The [.env.example](.env.example) lists configuration keys; the [settings loader]
 5. Write a final caption, approve it, then mark it ready. Approval and status are separate controls.
 6. Read or export the ready queue for a separate, explicitly authorized posting workflow.
 
-Run CLI commands from the repository root with the same Python environment and `backend/.env`:
+Run CLI commands from the repository root with the same Python environment and `.env`:
 
 ```bash
 python cli/reelctl.py list
