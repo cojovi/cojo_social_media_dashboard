@@ -190,7 +190,7 @@ npm run build --prefix frontend
 npm run lint --prefix frontend
 ```
 
-**Builds, tests, application startup, and provider calls were not run for this docs-only task.** Source inspection is not runtime certification.
+**The backend tests, frontend build, and frontend lint passed during the showcase review.** Application startup and live provider calls were not tested. Source inspection is not runtime certification.
 
 Before using a real archive, confirm the configured directories, shared CLI/UI database, loopback binding, queue rules, backup strategy, and cloud-upload consent using a small non-sensitive fixture set.
 
