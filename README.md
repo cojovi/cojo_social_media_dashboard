@@ -1,9 +1,10 @@
 <!-- COJOVI / SIGNAL — ReelVault project edition. Commit with readme-assets/. -->
 <a name="top"></a>
 
-<p align="center">
-  <img src="readme-assets/banner.svg" alt="ReelVault — discover footage, shape the caption, approve the queue." width="100%">
-</p>
+<picture>
+  <source media="(max-width: 640px)" srcset="readme-assets/showcase-mobile.svg">
+  <img src="readme-assets/showcase.svg" alt="ReelVault — local video archive, caption workbench and human-approved queue." width="100%">
+</picture>
 
 <h1 align="center">ReelVault</h1>
 
@@ -40,6 +41,17 @@ Browse by subject, filename, folder, storage state, captions, or notes. Review s
 
 > [!IMPORTANT]
 > **This prepares content; it does not publish it.** There are no social-platform login, scheduling, or posting integrations. The ready queue is a handoff surface, not proof that a post was delivered.
+
+## The engineering story
+
+**A personal library became a practical editorial workbench.** ReelVault connects a filesystem catalog, a local API, an interactive dashboard, and a command-line interface around a single SQLite archive. The goal: find usable footage, develop a caption, and make an explicit editorial decision before handing a clip off.
+
+- **Catalog without relocating originals.** The [scanner](backend/app/scanner.py) indexes folders and tracks availability; the archive retains references to local, offloaded, or missing sources.
+- **Keep people in control.** The [ready queue](backend/app/routes/queue.py) filters for approved, ready records with a nonblank caption and an available source. It is a handoff, not a social posting integration.
+- **Make AI an optional layer.** Quick summaries and full video analysis have different costs and workflows. Full analysis uploads video to Gemini and attempts cleanup; review suggestions before approval. See [AI integration](backend/app/gemini_service.py) and [archive worker](backend/app/archive.py).
+- **Share state between interfaces.** A React workbench and Python CLI operate on the same backend/catalog. [Dashboard](frontend/src/App.tsx) · [CLI](cli/reelctl.py) · [Data model](backend/app/models.py).
+
+**Verification:** 27 backend tests passed; the frontend production build and lint passed during this showcase review. These tests do not prove live Gemini output or social publishing.
 
 <a name="architecture"></a>
 ## `> trace_the_signal`
@@ -216,3 +228,5 @@ No repository license file was found in this revision. Public source visibility 
 </p>
 
 <p align="center"><a href="#top">↑ Back to the signal</a></p>
+
+Showcase artwork uses embedded typefaces; see [font licenses](readme-assets/SHOWCASE-FONT-LICENSES.txt).
